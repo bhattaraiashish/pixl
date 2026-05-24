@@ -1,7 +1,5 @@
 #scope_export
 
-LOBE_COUNT :: #run type_info(Lobe_Index).values.count;
-
 prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
 {
     if (wo.z <= 0.0)
@@ -80,14 +78,16 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
         ctx.multi_scatter_metal.scale  = scale_num / max(scale_den, make_spectrum(1.0e-6));
     }
 
+    ctx.ambient.alpha = surface.geometry_opacity;
+
     ctx.wo = wo;
 
     //------------------------------------------------------------------------
     // Lobe PDF Weights
 
-    for 0..LOBE_COUNT-1
+    for 0..BASE_LOBE_COUNT-1
     {
-        ctx.weights[it] = estimate_lobe(ctx.info, wo, it.(Lobe_Index));
+        ctx.weights[it] = estimate_base_lobe(ctx.base, wo, it.(Base_Lobe_Index));
     }
 
     return ctx;
@@ -95,41 +95,85 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
 
 sample_surface :: (using ctx: Shading_Context, u_sample: Vector3) -> Sample
 {
-    u      := clamp_random_sample(u_sample);
-    lobe   := pick_lobe(ctx, u.z);
-    sample := sample_lobe(info, wo, .{u.x, u.y, lobe.remapped_p}, lobe.index);
+    ux     := clamp_random_number(u_sample.x);
+    uy     := clamp_random_number(u_sample.y);
+    p      := clamp_random_number(u_sample.z);
+
+    if (p > ambient.alpha)
+    {
+        return make_sample(Spectrum_One, 1.0, -wo, .TRANSMISSION | .SPECULAR);
+    }
+
+    p       = p / ambient.alpha;
+    sample := sample_base_surface(base, wo, .{ux, uy, p});
+    return sample;
+}
+
+//------------------------------------------------------------------------
+// Base Surface
+
+evaluate_base_surface :: (using info: Base_Shading_Info, wo: Vector3, wi: Vector3) -> Spectrum
+{
+    weight := Spectrum_Zero;
+    for 0..BASE_LOBE_COUNT-1
+    {
+        weight += evaluate_base_lobe(info, wo, wi, it.(Base_Lobe_Index));
+    }
+    return weight;
+}
+
+pdf_base_surface :: (using info: Base_Shading_Info, wo: Vector3, wi: Vector3) -> float
+{
+    pdf := 0.0;
+    for 0..BASE_LOBE_COUNT-1
+    {
+        pdf += weights[it] * pdf_base_lobe(info, wo, wi, it.(Base_Lobe_Index));
+    }
+    return pdf;
+}
+
+sample_base_surface :: (using info: Base_Shading_Info, wo: Vector3, u: Vector3) -> Sample
+{
+    total_weight := 0.0;
+    for weights
+    {
+        total_weight += it;
+    }
+
+    index, p := pick_base_lobe(weights, u.z * total_weight);
+    sample   := sample_base_lobe(info, wo, .{u.x, u.y, p}, index);
 
     if !sample.lobe_type return make_zero_sample();
 
     if !(sample.lobe_type & .SPECULAR)
     {
         radiance := sample.weight * sample.pdf;
-        pdf      := sample.pdf * weights[lobe.index];
+        pdf      := sample.pdf * weights[index];
         
-        for 0..LOBE_COUNT-1
+        for 0..BASE_LOBE_COUNT-1
         {
-            index := it.(Lobe_Index);
-            if (index != lobe.index)
+            other := it.(Base_Lobe_Index);
+            if (other != index)
             {
-                radiance += evaluate_lobe(info, wo, sample.wi, index);
-                pdf      += weights[index] * pdf_lobe(info, wo, sample.wi, index);
+                radiance += evaluate_base_lobe(info, wo, sample.wi, other);
+                pdf      += weights[other] * pdf_base_lobe(info, wo, sample.wi, other);
             }
         }
 
-        sample.pdf = pdf / lobe.total_weight;
+        sample.pdf = pdf / total_weight;
         sample.weight = radiance / sample.pdf;
     }
     else
     {
-        sample.weight *= lobe.total_weight / ctx.weights[lobe.index];
+        sample.weight *= total_weight / weights[index];
     }
 
     return sample;
 }
 
-#scope_file
+#scope_module
 
-Lobe_Index :: enum u32
+Base_Lobe_Index :: enum u32
 {
     DIFFUSE                  :: 0;
     GLOSSY_SPECULAR          :: 1;
@@ -137,12 +181,7 @@ Lobe_Index :: enum u32
     MULTI_SCATTER_METAL      :: 3;
 }
 
-Lobe_Info :: struct
-{
-    index        : Lobe_Index;
-    remapped_p   : float;
-    total_weight : float;
-}
+BASE_LOBE_COUNT :: #run type_info(Base_Lobe_Index).values.count;
 
 calculate_specular_ior_for_dielectric_opaque :: (specular_weight: float, eta_t_over_eta_i: float) -> float
 {
@@ -153,33 +192,26 @@ calculate_specular_ior_for_dielectric_opaque :: (specular_weight: float, eta_t_o
     return effective;
 }
 
-pick_lobe :: (ctx: Shading_Context, p: float) -> Lobe_Info
+pick_base_lobe :: (weights: Base_Lobe_Weights, p: float) -> index: Base_Lobe_Index, remapped_p: float
 {
-    total_weight := 0.0;
-    for ctx.weights
-    {
-        total_weight += it;
-    }
-
-    p *= total_weight;
     weights_so_far := 0.0;
-    for 0..LOBE_COUNT-2
+    for 0..BASE_LOBE_COUNT-2
     {
-        it_lobe_weight := ctx.weights[it];
+        it_lobe_weight := weights[it];
         if (p < weights_so_far + it_lobe_weight)
         {
             remapped_p := clamp_random_number((p - weights_so_far) / it_lobe_weight);
-            return .{it.(Lobe_Index), remapped_p, total_weight};
+            return it.(Base_Lobe_Index), remapped_p;
         }
         weights_so_far += it_lobe_weight;
     }
-    last        := LOBE_COUNT - 1;
-    last_weight := ctx.weights[last];
+    last        := BASE_LOBE_COUNT - 1;
+    last_weight := weights[last];
     remapped_p  := clamp_random_number((p - weights_so_far) / last_weight);
-    return .{last.(Lobe_Index), FLOAT32_ONE_MINUS_EPSILON, total_weight};
+    return last.(Base_Lobe_Index), FLOAT32_ONE_MINUS_EPSILON;
 }
 
-evaluate_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Index) -> Spectrum
+evaluate_base_lobe :: (info: Base_Shading_Info, wo: Vector3, wi: Vector3, index: Base_Lobe_Index) -> Spectrum
 {
     if #complete index ==
     {
@@ -195,7 +227,7 @@ evaluate_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Inde
     return Spectrum_Zero;
 }
 
-pdf_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Index) -> float
+pdf_base_lobe :: (info: Base_Shading_Info, wo: Vector3, wi: Vector3, index: Base_Lobe_Index) -> float
 {
     if #complete index ==
     {
@@ -211,7 +243,7 @@ pdf_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Index) ->
     return 0.0;
 }
 
-sample_lobe :: (info: Shading_Info, wo: Vector3, u: Vector3, index: Lobe_Index) -> Sample
+sample_base_lobe :: (info: Base_Shading_Info, wo: Vector3, u: Vector3, index: Base_Lobe_Index) -> Sample
 {
     if #complete index ==
     {
@@ -227,7 +259,7 @@ sample_lobe :: (info: Shading_Info, wo: Vector3, u: Vector3, index: Lobe_Index) 
     return .{};
 }
 
-estimate_lobe :: (info: Shading_Info, wo: Vector3, index: Lobe_Index) -> float
+estimate_base_lobe :: (info: Base_Shading_Info, wo: Vector3, index: Base_Lobe_Index) -> float
 {
     if #complete index ==
     {
@@ -917,15 +949,6 @@ FLOAT32_ONE_MINUS_EPSILON :: 0h3F7FFFFF;
 clamp_random_number :: inline (p: float) -> float
 {
     return min(p, FLOAT32_ONE_MINUS_EPSILON);
-}
-
-clamp_random_sample :: inline (u: Vector3) -> Vector3
-{
-    clamped_u: Vector3 = ---;
-    clamped_u.x = clamp_random_number(u.x);
-    clamped_u.y = clamp_random_number(u.y);
-    clamped_u.z = clamp_random_number(u.z);
-    return clamped_u;
 }
 
 #import "Math";

@@ -78,23 +78,28 @@ Multi_Scatter_Metal_Shading_Info :: struct
     scale                      : Spectrum;
 }
 
-Shading_Info :: struct
+Base_Lobe_Weights :: [BASE_LOBE_COUNT]float;
+
+Base_Shading_Info :: struct
 {
     diffuse                  : Diffuse_Shading_Info;
     glossy_specular          : Glossy_Specular_Shading_Info;
     multi_scatter_dielectric : Multi_Scatter_Dielectric_Shading_Info;
     multi_scatter_metal      : Multi_Scatter_Metal_Shading_Info;
-    geometry_opacity         : float;
+    weights                  : Base_Lobe_Weights;
+}
+
+Ambient_Shading_Info :: struct
+{
+    alpha: float;
 }
 
 Shading_Context :: struct
 {
-    using info   : Shading_Info;
-    wo           : Vector3;
-    weights      : Lobe_Weights;
+    using base : Base_Shading_Info;
+    ambient    : Ambient_Shading_Info;
+    wo         : Vector3;
 }
-
-Lobe_Weights :: [LOBE_COUNT]float;
 
 Transport :: enum u32
 {
