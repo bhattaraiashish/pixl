@@ -26,9 +26,8 @@ Surface :: struct
     edge_tint            : Spectrum;
     falloff              : Spectrum;
 
-    // TODO: Use these
     // Ambient Medium
-    geometry_opacity    : float;
+    geometry_opacity     : float;
 
     // TODO: Include these into the BRDF
     absorption       : Spectrum;
@@ -61,6 +60,16 @@ Glossy_Specular_Shading_Info :: struct
     falloff                               : Spectrum;
 }
 
+Multi_Scatter_Dielectric_Shading_Info :: struct
+{
+    microfacet_alpha           : float;
+    eta_t_over_eta_i           : float;
+    energy_complement_wo_dot_n : float;
+    reflection_ratio           : float;
+    reflect_scale              : Spectrum;
+    transmit_scale             : Spectrum;
+}
+
 Multi_Scatter_Metal_Shading_Info :: struct
 {
     microfacet_alpha           : float;
@@ -71,16 +80,17 @@ Multi_Scatter_Metal_Shading_Info :: struct
 
 Shading_Info :: struct
 {
-    diffuse             : Diffuse_Shading_Info;
-    glossy_specular     : Glossy_Specular_Shading_Info;
-    multi_scatter_metal : Multi_Scatter_Metal_Shading_Info;
+    diffuse                  : Diffuse_Shading_Info;
+    glossy_specular          : Glossy_Specular_Shading_Info;
+    multi_scatter_dielectric : Multi_Scatter_Dielectric_Shading_Info;
+    multi_scatter_metal      : Multi_Scatter_Metal_Shading_Info;
+    geometry_opacity         : float;
 }
 
 Shading_Context :: struct
 {
     using info   : Shading_Info;
     wo           : Vector3;
-    total_weight : float;
     weights      : Lobe_Weights;
 }
 
@@ -175,7 +185,7 @@ sample_uniform_sphere :: (u1: float, u2: float) -> Vector3
 
 pdf_uniform_sphere :: () -> float
 {
-    return 1.0 / (4.0 * PI);
+    return 0.25 * RCP_PI;
 }
 
 sample_cosine :: (u1: float, u2: float) -> Vector3
@@ -191,7 +201,7 @@ sample_cosine :: (u1: float, u2: float) -> Vector3
 
 pdf_cosine :: (wi: Vector3) -> float
 {
-    return wi.z / PI;
+    return wi.z * RCP_PI;
 }
 
 //------------------------------------------------------------------------
@@ -204,7 +214,7 @@ max_spectrum :: inline (s: Spectrum) -> float
 
 reflect :: inline (I: Vector3, N: Vector3) -> Vector3
 {
-    return I - 2.0 * dot(N, I) * N;
+    return normalize(I - 2.0 * dot(N, I) * N);
 }
 
 refract :: inline (I: Vector3, N: Vector3, eta_t_over_eta_i: float) -> Vector3, bool
@@ -217,7 +227,11 @@ refract :: inline (I: Vector3, N: Vector3, eta_t_over_eta_i: float) -> Vector3, 
     {
         cos_t := sqrt(1.0 - sin2_t);
         R     := I * eta_i_over_eta_t + (cos_i * eta_i_over_eta_t - cos_t) * N;
-        return R, true;
+        return normalize(R), true;
     }
     return .{}, false;
 }
+
+#scope_module
+
+RCP_PI :: 1.0 / PI;

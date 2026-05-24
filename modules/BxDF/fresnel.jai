@@ -3,9 +3,6 @@
 // Artist Friendly - Schlick inspired
 // Based on: https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
 
-MAX_REASONABLE_IOR :: 400.0;
-MIN_REASONABLE_IOR :: 1.0 / MAX_REASONABLE_IOR;
-
 fresnel_metal :: (reflectance: Spectrum, edge_tint: Spectrum, falloff: Spectrum, wo_dot_wh: float) -> Spectrum
 {
     t   := 1.0 - wo_dot_wh;
@@ -48,31 +45,6 @@ fresnel_dielectric_unpolarized :: (eta_t_over_eta_i: float, mu: float) -> float
 fresnel_dielectric :: (eta_t_over_eta_i: float, mu: float) -> Spectrum
 {
     fresnel := fresnel_dielectric_unpolarized(eta_t_over_eta_i, mu);
-    return make_spectrum(fresnel);
-}
-
-fresnel_average_dielectric_unpolarized :: (eta_t_over_eta_i: float) -> float
-{
-    n := clamp(eta_t_over_eta_i, MIN_REASONABLE_IOR, MAX_REASONABLE_IOR);
-    if (n >= 1.0)
-    {
-        num   := n - 1.0;
-        den   := 4.08567 + 1.00071 * n;
-        F_avg := num / den;
-        return F_avg;
-    }
-    else
-    {
-        n2    := n * n;
-        n3    := n2 * n;
-        F_avg := 0.997118 + 0.1014 * n - 0.965241 * n2 - 0.1306073 * n3;
-        return F_avg;
-    }
-}
-
-fresnel_average_dielectric :: (eta_t_over_eta_i: float) -> Spectrum
-{
-    fresnel := fresnel_average_dielectric_unpolarized(eta_t_over_eta_i);
     return make_spectrum(fresnel);
 }
 

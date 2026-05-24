@@ -13,7 +13,7 @@ build_program :: (outpath: string, name: string, src: string)
 
     // TODO: Include these only for required workspaces
     add_build_string("ENABLE_RAD_DEBUGGER :: true;", w);
-    add_build_string("RT_DEBUG :: true;", w);
+    add_build_string("DEBUG :: true;", w);
 
     add_build_file(src, w);
 
@@ -24,7 +24,7 @@ build_program :: (outpath: string, name: string, src: string)
 
 build :: ()
 {
-    // TODO: This doesn't work?
+    // TODO: This doesn't work? Email?
     //cuda_lib_path := path_join(to_string(getenv("CUDA_PATH")), "lib", "x64");
     //compiler_add_library_search_directory(cuda_lib_path);
 

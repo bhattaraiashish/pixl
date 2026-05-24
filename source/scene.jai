@@ -131,7 +131,7 @@ test_scene :: (using scene: *Scene, $parameterize_material : #type(m: *Material,
     start_x           := -2.8;
     start_y           :=  1.6;
 
-    checkerboard_texture  := create_checkerboard_texture(Vector3.{1, 1, 1}, .{0.27, 0.27, 0.27}, .{40, 40});
+    checkerboard_texture  := create_checkerboard_texture(Vector3.{1, 1, 1}, .{0.9, 0.1, 0.1}, .{40, 40});
     checkerboard_material := create_lambertian_material(scene, checkerboard_texture);
 
     add_box(scene, Matrix4_Identity, .{-6, -6, 0.5}, .{6, 6, 0.6}, checkerboard_material);
@@ -1262,6 +1262,7 @@ material_surface :: (material: Material, hit: Hit_Info) -> Surface
     surface.absorption           = absorption_strength * absorption;
     surface.emission             = emission_strength * emission_color;
 
+    // TODO: Do this in prepare_surface
     if (hit.face == .BACK)
     {
         surface.specular_ior = 1.0 / surface.specular_ior;
@@ -1372,12 +1373,18 @@ trace_path :: (scene: Scene, primary: Ray, depth: s32, rng: *Path_State, stats: 
 
             sample := sample_surface(shading_context, .{u.x, u.y, p});
 
-            max_acceptable_radiance := 100.0;
-            if max_spectrum(sample.weight) > max_acceptable_radiance || !is_valid_spectrum(sample.weight)
-            {
-                print("sample exceeds % [ sample = % ]\n", max_acceptable_radiance, sample);
-                print("    shading_context : %\n", shading_context);
-            }
+  //          max_acceptable_radiance := 100.0;
+  //          if max_spectrum(sample.weight) > max_acceptable_radiance || !is_valid_spectrum(sample.weight)
+  //          {
+  //              new_context := context;
+  //              push_context new_context
+  //              {
+  //                  context.print_style.default_format_struct.use_long_form_if_more_than_this_many_members = -1;
+  //                  context.print_style.default_format_struct.use_newlines_if_long_form = true;
+  //                  print("sample exceeds % [ sample = % ]\n", max_acceptable_radiance, sample);
+  //                  print("    shading_context : %\n", shading_context);
+  //              }
+  //          }
 
             if (hit.face == .BACK)
             {

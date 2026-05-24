@@ -14,21 +14,24 @@ Glossy_Specular_Type :: enum s32
     DIELECTRIC_TRANSPARENT;
 }
 
-Integration_Result :: struct
+Kernel_Result :: struct
 {
+    name      : string;
+    devptr    : CUdeviceptr;
     n_x       : s32;
     n_y       : s32;
     n_z       : s32;
-    n_samples : s64;
-    type      : Glossy_Specular_Type;
-    method    : Integrate_Method;
-    devptr    : CUdeviceptr;
     count     : int;
     stream    : CUstream;
 }
 
-execute_integrate :: (func: CUfunction, xn: s32, yn: s32, zn: s32, n_samples: s64, type: Glossy_Specular_Type, method: Integrate_Method) -> Integration_Result
+KERNEL_DEFAULT_ARGUMENTS :: 4;
+KERNEL_MAX_ARGUMENTS     :: 12;
+
+execute_kernel :: (func: CUfunction, name: string, xn: s32, yn: s32, zn: s32, args: ..Any) -> Kernel_Result
 {
+    print("Executing: %...\n", name);
+
     BLOCK_SIZE :: 8;
 
     if (xn > 1 && xn % BLOCK_SIZE != 0)
@@ -40,19 +43,17 @@ execute_integrate :: (func: CUfunction, xn: s32, yn: s32, zn: s32, n_samples: s6
     {
         print("WARNING: yn=% is not divisible by %\n", yn, BLOCK_SIZE);
     }
-    
+
     if (zn > 1 && zn % BLOCK_SIZE != 0)
     {
         print("WARNING: zn=% is not divisible by %\n", zn, BLOCK_SIZE);
     }
 
-    result: Integration_Result;
+    result: Kernel_Result;
+    result.name      = name;
     result.n_x       = xn;
     result.n_y       = yn;
     result.n_z       = zn;
-    result.n_samples = n_samples;
-    result.type      = type;
-    result.method    = method;
     result.count     = xn * yn * zn;
 
     status := cuMemAlloc(*result.devptr, result.count.(u64) * size_of(float));
@@ -71,11 +72,35 @@ execute_integrate :: (func: CUfunction, xn: s32, yn: s32, zn: s32, n_samples: s6
     config.gridDimZ  = xx zn / config.blockDimZ;
     config.hStream   = result.stream;
 
-    args  := *void.[*result.method, *result.type, *result.n_x, *result.n_y, *result.n_z, *result.n_samples, *result.devptr];
-    status = cuLaunchKernelEx(*config, func, args.data, null);
+    num_args := KERNEL_DEFAULT_ARGUMENTS + args.count;
+
+    if (num_args > KERNEL_MAX_ARGUMENTS)
+    {
+        print("ERROR: Number of arguments to kernel is larger than expected. Arguments Count = %, Max Expected = %\n", num_args, KERNEL_MAX_ARGUMENTS);
+        exit(1);
+    }
+
+    kargs: [KERNEL_MAX_ARGUMENTS]*void;
+    kargs[0] = *result.devptr;
+    kargs[1] = *result.n_x;
+    kargs[2] = *result.n_y;
+    kargs[3] = *result.n_z;
+
+    for args
+    {
+        kargs[KERNEL_DEFAULT_ARGUMENTS + it_index] = it.value_pointer;
+    }
+
+    status = cuLaunchKernelEx(*config, func, kargs.data, null);
     cu_handle_error(status, "Failed to launch kernel");
 
     return result;
+}
+
+execute_integrate :: (func: CUfunction, xn: s32, yn: s32, zn: s32, n_samples: s64, type: Glossy_Specular_Type, method: Integrate_Method) -> Kernel_Result
+{
+    name := tprint("%_%", type, ifx method == .DIRECTIONAL_ALBEDO then "ENERGY" else "AVG_ENERGY");
+    return execute_kernel(func, name, xn, yn, zn, n_samples, type, method);
 }
 
 Output_Options :: struct
@@ -107,20 +132,41 @@ main :: ()
     status = cuModuleLoadFatBinary(*mod, INTEGRATION_FATCUBIN.data.(*void));
     cu_handle_error(status, "Failed to load fat binary");
 
-    func : CUfunction;
-    status = cuModuleGetFunction(*func, mod, "integrate_glossy_specular\0".data);
-    cu_handle_error(status, "Failed to get function");
+    KERNEL_NAMES :: string.["integrate_glossy_specular\0", "calculate_dielectric_reflection_ratio\0"];
+    kernels: [2]CUfunction;
 
-    results: [6]Integration_Result;
+    for * kernels
+    {
+        status = cuModuleGetFunction(it, mod, KERNEL_NAMES[it_index].data);
+        cu_handle_error(status, "Failed to get kernel function");
+    }
 
-    results[0] = execute_integrate(func, 32,  1, 1, 16 * 1024 * 1024, .METAL, .HEMISPHERICAL_ALBEDO);
-    results[1] = execute_integrate(func, 32, 32, 1,  8 * 1024 * 1024, .METAL, .DIRECTIONAL_ALBEDO);
+    N :: 32;
+
+    results: [7]Kernel_Result;
+
+    results[0] = execute_integrate(kernels[0], N, 1, 1, 16 * 1024 * 1024, .METAL, .HEMISPHERICAL_ALBEDO);
+    results[1] = execute_integrate(kernels[0], N, N, 1,  8 * 1024 * 1024, .METAL, .DIRECTIONAL_ALBEDO);
   
-    results[2] = execute_integrate(func, 32,  1, 32, 16 * 1024 * 1024, .DIELECTRIC_OPAQUE, .HEMISPHERICAL_ALBEDO);
-    results[3] = execute_integrate(func, 32, 32, 32,  8 * 1024 * 1024, .DIELECTRIC_OPAQUE, .DIRECTIONAL_ALBEDO);
+    results[2] = execute_integrate(kernels[0], N, 1, N, 16 * 1024 * 1024, .DIELECTRIC_OPAQUE, .HEMISPHERICAL_ALBEDO);
+    results[3] = execute_integrate(kernels[0], N, N, N,  8 * 1024 * 1024, .DIELECTRIC_OPAQUE, .DIRECTIONAL_ALBEDO);
 
-    results[4] = execute_integrate(func, 32,  1, 32, 16 * 1024 * 1024, .DIELECTRIC_TRANSPARENT, .HEMISPHERICAL_ALBEDO);
-    results[5] = execute_integrate(func, 32, 32, 32,  8 * 1024 * 1024, .DIELECTRIC_TRANSPARENT, .DIRECTIONAL_ALBEDO);
+    results[4] = execute_integrate(kernels[0], N, 1, N, 16 * 1024 * 1024, .DIELECTRIC_TRANSPARENT, .HEMISPHERICAL_ALBEDO);
+    results[5] = execute_integrate(kernels[0], N, N, N,  8 * 1024 * 1024, .DIELECTRIC_TRANSPARENT, .DIRECTIONAL_ALBEDO);
+
+    for 0..5
+    {
+        print("Waiting for %...\n", results[it].name);
+        status = cuStreamSynchronize(results[it].stream);
+        cu_handle_error(status, "Failed to synchronize stream");
+    }
+
+    results[6] = execute_kernel(kernels[1], "DIELECTRIC_REFLECTION_RATIO", N, 1, N, results[4].devptr);
+
+    status = cuStreamSynchronize(results[6].stream);
+    cu_handle_error(status, "Failed to synchronize stream");
+
+    //------------------------------------------------------------------------
 
     builder: String_Builder;
 
@@ -148,55 +194,20 @@ main :: ()
 
     values := NewArray(max_count, float, initialized=false);
 
+    print(*builder, "LUT_SIZE : s32 : %;\n", N);
+
     for results
     {
-        status = cuStreamSynchronize(it.stream);
-        cu_handle_error(status, "Failed to synchronize stream");
+        print("Writing %...\n", it.name);
 
         status = cuMemcpyDtoH_v2(values.data, it.devptr, it.count.(u64) * size_of(float));
         cu_handle_error(status, "Failed to synchronize stream");
 
-        name := tprint("%_%%",
-                       it.type,
-                       ifx it.method == .DIRECTIONAL_ALBEDO then "ENERGY" else "AVG_ENERGY",
-                       ifx options.complement "_COMPLEMENT" else "");
-        type := ifx options.quantize then "u16" else "float";
+        complement := options.complement;
+        // Don't complement dielectric reflection ratio
+        if it_index == 6 complement = false;
 
-        print(*builder, "%_LUT_SIZE : s32 : %;\n", name, it.n_x);
-        print(*builder, "%_LUT  : [%]% : .[\n", name, it.n_x * it.n_y * it.n_z, type);
-        
-        for z:0..it.n_z-1
-        {
-            for y:0..it.n_y-1
-            {
-                for x:0..it.n_x-1
-                {
-                    index := z * it.n_y * it.n_x + y * it.n_x + x;
-                    value := values[index];
-
-                    if options.complement
-                    {
-                        value = 1.0 - value;
-                    }
-
-                    if options.quantize
-                    {
-                        quantized  := clamp(value * U16_MAX.(float), 0.0, U16_MAX.(float)).(u16);
-                        print(*builder, "0x%,", FormatInt.{value=quantized, base=16, minimum_digits=4});
-                    }
-                    else
-                    {
-                        print(*builder, "%,", FormatFloat.{value=value, width=8, zero_removal=.NO});
-                    }
-                }
-                if it.n_y > 1
-                    print(*builder, "\n");
-            }
-            if it.n_z > 1
-                print(*builder, "\n");
-        }
-
-        print(*builder, "];\n\n");
+        write_lut(*builder, it.name, values, it.n_x, it.n_y, it.n_z, options.quantize, complement);
     }
 
     output := "bsdf_energy_compensation_lut.jai";
@@ -205,6 +216,45 @@ main :: ()
         output = "bsdf_energy_compensation_quantized_lut.jai";
     }
     write_entire_file(output, *builder);
+}
+
+write_lut :: (builder: *String_Builder, name: string, values: []float, n_x: int, n_y: int, n_z: int, quantize: bool, complement: bool)
+{
+    type    := ifx quantize then "u16" else "float";
+    postfix := ifx complement then "_COMPLEMENT" else "";
+
+    print(builder, "%%_LUT  : [%]% : .[\n", name, postfix, n_x * n_y * n_z, type);
+
+    for z:0..n_z-1
+    {
+        for y:0..n_y-1
+        {
+            for x:0..n_x-1
+            {
+                index := z * n_y * n_x + y * n_x + x;
+                value := values[index];
+
+                if complement
+                {
+                    value = 1.0 - value;
+                }
+
+                if quantize
+                {
+                    quantized  := clamp(value * U16_MAX.(float), 0.0, U16_MAX.(float)).(u16);
+                    print(builder, "0x%,", FormatInt.{value=quantized, base=16, minimum_digits=4});
+                }
+                else
+                {
+                    print(builder, "%,", FormatFloat.{value=value, width=8, zero_removal=.NO});
+                }
+            }
+            if n_y > 1 print(builder, "\n");
+        }
+        if n_z > 1 print(builder, "\n");
+    }
+
+    print(builder, "];\n\n");
 }
 
 cu_handle_error :: (status: CUresult, msg: string)

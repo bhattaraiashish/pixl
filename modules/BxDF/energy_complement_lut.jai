@@ -48,6 +48,14 @@ read_dielectric_transparent_energy_complement :: (alpha: float, cosine: float, e
     return energy_complement;
 }
 
+read_dielectric_reflection_ratio :: (alpha: float, eta_t_over_eta_i: float) -> float
+{
+    alpha_index := calculate_alpha_index(alpha);
+    ior_index   := calculate_ior_index(eta_t_over_eta_i);
+    ratio       := read_table_2D(.DIELECTRIC_REFLECTION_RATIO, alpha_index, ior_index);
+    return ratio;
+}
+
 #scope_file
 
 calculate_alpha_index :: inline (alpha: float) -> float
@@ -87,18 +95,12 @@ Energy_Complement_LUT :: enum u32
     DIELECTRIC_OPAQUE_AVERAGE;
     DIELECTRIC_TRANSPARENT;
     DIELECTRIC_TRANSPARENT_AVERAGE;
+    DIELECTRIC_REFLECTION_RATIO;
 }
-
-#assert METAL_AVG_ENERGY_COMPLEMENT_LUT_SIZE == METAL_ENERGY_COMPLEMENT_LUT_SIZE &&
-        METAL_AVG_ENERGY_COMPLEMENT_LUT_SIZE == DIELECTRIC_OPAQUE_AVG_ENERGY_COMPLEMENT_LUT_SIZE &&
-        METAL_AVG_ENERGY_COMPLEMENT_LUT_SIZE == DIELECTRIC_OPAQUE_ENERGY_COMPLEMENT_LUT_SIZE &&
-        METAL_AVG_ENERGY_COMPLEMENT_LUT_SIZE == DIELECTRIC_TRANSPARENT_AVG_ENERGY_COMPLEMENT_LUT_SIZE &&
-        METAL_AVG_ENERGY_COMPLEMENT_LUT_SIZE == DIELECTRIC_TRANSPARENT_ENERGY_COMPLEMENT_LUT_SIZE;
 
 #assert LUT_SIZE % 2 == 0;
 
 LUT_HALF_SIZE  :: LUT_SIZE / 2;
-LUT_SIZE       :: METAL_AVG_ENERGY_COMPLEMENT_LUT_SIZE;
 LUT_SLICE      :: LUT_SIZE * LUT_SIZE;
 
 read_lut :: ($lut: Energy_Complement_LUT, index: s32) -> float
@@ -112,6 +114,7 @@ read_lut :: ($lut: Energy_Complement_LUT, index: s32) -> float
         case .DIELECTRIC_OPAQUE_AVERAGE;       quantized = DIELECTRIC_OPAQUE_AVG_ENERGY_COMPLEMENT_LUT[index];
         case .DIELECTRIC_TRANSPARENT;          quantized = DIELECTRIC_TRANSPARENT_ENERGY_COMPLEMENT_LUT[index];
         case .DIELECTRIC_TRANSPARENT_AVERAGE;  quantized = DIELECTRIC_TRANSPARENT_AVG_ENERGY_COMPLEMENT_LUT[index];
+        case .DIELECTRIC_REFLECTION_RATIO;     quantized = DIELECTRIC_REFLECTION_RATIO_LUT[index];
     }
 
     INVERSE_U16 :: 1.0 / U16_MAX.(float);
@@ -144,7 +147,7 @@ sampler_1D :: inline (u: float) -> s32, s32, float
     return i0, i1, uf;
 }
 
-read_table_1D :: inline ($lut: Energy_Complement_LUT, x_index: float) -> float
+read_table_1D :: ($lut: Energy_Complement_LUT, x_index: float) -> float
 {
     x_quant_0, x_quant_1, x_frac := sampler_1D(x_index);
 
@@ -156,7 +159,7 @@ read_table_1D :: inline ($lut: Energy_Complement_LUT, x_index: float) -> float
     return v;
 }
 
-read_table_2D :: inline ($lut: Energy_Complement_LUT, x_index: float, y_index: float) -> float
+read_table_2D :: ($lut: Energy_Complement_LUT, x_index: float, y_index: float) -> float
 {
     x_quant_0, x_quant_1, x_frac := sampler_1D(x_index);
     y_quant_0, y_quant_1, y_frac := sampler_1D(y_index);
@@ -173,7 +176,7 @@ read_table_2D :: inline ($lut: Energy_Complement_LUT, x_index: float, y_index: f
     return v;
 }
 
-read_table_3D :: inline ($lut: Energy_Complement_LUT, x_index: float, y_index: float, z_index: float) -> float
+read_table_3D :: ($lut: Energy_Complement_LUT, x_index: float, y_index: float, z_index: float) -> float
 {
     x_quant_0, x_quant_1, x_frac := sampler_1D(x_index);
     y_quant_0, y_quant_1, y_frac := sampler_1D(y_index);

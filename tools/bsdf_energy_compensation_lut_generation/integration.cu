@@ -245,7 +245,7 @@ __device__ bool refract(Vector3 I, Vector3 N, float eta_t_over_eta_i, Vector3* R
     if (sin2_t < 1.0)
     {
         float cos_t = sqrt(1.0 - sin2_t);
-        *R          = I * eta_i_over_eta_t + (cos_i * eta_i_over_eta_t - cos_t) * N;
+        *R          = normalize(I * eta_i_over_eta_t + (cos_i * eta_i_over_eta_t - cos_t) * N);
         return true;
     }
     return false;
@@ -274,6 +274,27 @@ __device__ Spectrum fresnel_dielectric(float eta_t_over_eta_i, float mu)
 {
     float fresnel = fresnel_dielectric_unpolarized(eta_t_over_eta_i, mu);
     return make_float3(fresnel, fresnel, fresnel);
+}
+
+__device__ float fresnel_average_dielectric(float eta_t_over_eta_i)
+{
+    constexpr float MAX_REASONABLE_IOR = 400.0;
+    constexpr float MIN_REASONABLE_IOR = 1.0 / MAX_REASONABLE_IOR;
+    float n = clamp(eta_t_over_eta_i, MIN_REASONABLE_IOR, MAX_REASONABLE_IOR);
+    if (n >= 1.0)
+    {
+        float num   = n - 1.0;
+        float den   = 4.08567 + 1.00071 * n;
+        float f_avg = num / den;
+        return f_avg;
+    }
+    else
+    {
+        float n2    = n * n;
+        float n3    = n2 * n;
+        float f_avg = 0.997118 + 0.1014 * n - 0.965241 * n2 - 0.1306073 * n3;
+        return f_avg;
+    }
 }
 
 __device__ float ior_parametrization(float t)
@@ -322,7 +343,6 @@ __device__ Glossy_Specular_Coefficient_Probability calculate_glossy_specular_coe
         if (info.type == GLOSSY_SPECULAR_DIELECTRIC_TRANSPARENT)
         {
             coeff.transmit_coefficient = make_float3(1, 1, 1) - coeff.reflect_coefficient;
-            coeff.transmit_coefficient /= (info.eta_t_over_eta_i * info.eta_t_over_eta_i);
         }
         coeff.reflect_probability = max_spectrum(coeff.reflect_coefficient);
         coeff.transmit_probability = max_spectrum(coeff.transmit_coefficient);
@@ -352,19 +372,23 @@ __device__ Spectrum sample_glossy_specular(const Glossy_Specular_Shading_Info& i
         float wo_dot_wh = dot(wo, wh);
         Glossy_Specular_Coefficient_Probability coefficients_and_probabilities = calculate_glossy_specular_coefficients_and_probabilities(info, wo_dot_wh);
 
-        if (coefficients_and_probabilities.total_probability <= FLT_EPSILON)
+        if (coefficients_and_probabilities.total_probability == 0.0)
             return make_float3(0, 0, 0);
 
-        if (p < coefficients_and_probabilities.reflect_probability)
+        Spectrum reflect_coeff  = coefficients_and_probabilities.reflect_coefficient;
+        Spectrum transmit_coeff = coefficients_and_probabilities.transmit_coefficient;
+        float    reflect_prob   = coefficients_and_probabilities.reflect_probability;
+        float    transmit_prob  = coefficients_and_probabilities.transmit_probability;
+
+        if (p < reflect_prob)
         {
-            Vector3 wi = reflect(-wo, wh);
+            Vector3 wi = normalize(reflect(-wo, wh));
             if (wi.z > 0.0)
             {
-                float wi_dot_n    = wi.z;
                 float mask_shadow = microfacet_ggx_mask_shadow(wo, wi, info.microfacet_alpha);
                 float mask        = microfacet_ggx_mask(wo, info.microfacet_alpha);
-                float radiance    = mask_shadow / max(mask * wi_dot_n, 1.0e-6);
-                Spectrum weight   = coefficients_and_probabilities.reflect_coefficient * radiance * wi.z / coefficients_and_probabilities.reflect_probability;
+                float shadow      = mask_shadow / mask;
+                Spectrum weight   = reflect_coeff * shadow / reflect_prob;
                 return weight;
             }
         }
@@ -374,11 +398,10 @@ __device__ Spectrum sample_glossy_specular(const Glossy_Specular_Shading_Info& i
             bool refracted = refract(-wo, wh, info.eta_t_over_eta_i, &wi);
             if (refracted && wi.z < 0.0)
             {
-                float wi_dot_n    = -wi.z;
                 float mask_shadow = microfacet_ggx_mask_shadow(wo, wi, info.microfacet_alpha);
                 float mask        = microfacet_ggx_mask(wo, info.microfacet_alpha);
-                float radiance    = mask_shadow / max(mask * wi_dot_n, 1.0e-6);
-                Spectrum weight   = coefficients_and_probabilities.transmit_coefficient * radiance * (-wi.z) / coefficients_and_probabilities.transmit_probability;
+                float shadow      = mask_shadow / mask;
+                Spectrum weight   = transmit_coeff * shadow / transmit_prob;
                 return weight;
             }
         }
@@ -389,15 +412,20 @@ __device__ Spectrum sample_glossy_specular(const Glossy_Specular_Shading_Info& i
         float wo_dot_wh = dot(wo, wh);
         Glossy_Specular_Coefficient_Probability coefficients_and_probabilities = calculate_glossy_specular_coefficients_and_probabilities(info, wo_dot_wh);
 
-        if (coefficients_and_probabilities.total_probability <= FLT_EPSILON)
+        if (coefficients_and_probabilities.total_probability == 0.0)
             return make_float3(0, 0, 0);
 
-        if (p < coefficients_and_probabilities.reflect_probability)
+        Spectrum reflect_coeff  = coefficients_and_probabilities.reflect_coefficient;
+        Spectrum transmit_coeff = coefficients_and_probabilities.transmit_coefficient;
+        float    reflect_prob   = coefficients_and_probabilities.reflect_probability;
+        float    transmit_prob  = coefficients_and_probabilities.transmit_probability;
+
+        if (p < reflect_prob)
         {
-            Vector3 wi = reflect(-wo, wh);
+            Vector3 wi = normalize(reflect(-wo, wh));
             if (wi.z > 0.0)
             {
-                Spectrum weight = coefficients_and_probabilities.reflect_coefficient / coefficients_and_probabilities.reflect_probability;
+                Spectrum weight = reflect_coeff / reflect_prob;
                 return weight;
             }
         }
@@ -407,8 +435,7 @@ __device__ Spectrum sample_glossy_specular(const Glossy_Specular_Shading_Info& i
             bool refracted = refract(-wo, wh, info.eta_t_over_eta_i, &wi);
             if (refracted && wi.z < 0.0)
             {
-                Spectrum weight = coefficients_and_probabilities.transmit_coefficient / coefficients_and_probabilities.transmit_probability;
-                weight /= (info.eta_t_over_eta_i * info.eta_t_over_eta_i);
+                Spectrum weight = transmit_coeff / transmit_prob;
                 return weight;
             }
         }
@@ -432,14 +459,13 @@ enum Integrate_Method
     INTEGRATE_HEMISPHERICAL_ALBEDO,
 };
 
-extern "C" __global__ void integrate_glossy_specular(Integrate_Method method, Glossy_Specular_Type type, int32_t n_x, int32_t n_y, int32_t n_z, int64_t n_samples, float *dst)
+extern "C" __global__ void integrate_glossy_specular(float *dst, int32_t n_x, int32_t n_y, int32_t n_z, int64_t n_samples, Glossy_Specular_Type type, Integrate_Method method)
 {
     int x = threadIdx.x + blockIdx.x * blockDim.x;
     int y = threadIdx.y + blockIdx.y * blockDim.y;
     int z = threadIdx.z + blockIdx.z * blockDim.z;
 
     int32_t  half_z = n_z / 2;
-    int32_t  z_out  = z;
     uint32_t seed   = hash(x, y);
 
     float alpha     = (n_x > 1) ? ((float)x / (float)(n_x - 1)) : 0.0f;
@@ -461,7 +487,9 @@ extern "C" __global__ void integrate_glossy_specular(Integrate_Method method, Gl
         {
             if (z < half_z)
             {
+                // Mirror the first half to make the sequence (1/ior,1.0) and (1.0,ior)
                 ior_param = (float)z / (float)(half_z - 1);
+                ior_param = 1.0 - ior_param;
             }
             else
             {
@@ -484,7 +512,6 @@ extern "C" __global__ void integrate_glossy_specular(Integrate_Method method, Gl
         if (z < half_z)
         {
             ior   = 1.0 / ior;
-            z_out = (half_z - 1) - z;
         }
 
         Glossy_Specular_Shading_Info info = make_glossy_specular(type, make_float2(alpha, alpha), ior);
@@ -495,10 +522,54 @@ extern "C" __global__ void integrate_glossy_specular(Integrate_Method method, Gl
         {
             albedo *= 2 * cosine;
         }
+
         sum += (double)albedo;
     }
 
-    double avg   = sum / (double)n_samples;
-    int    index = z_out * n_x * n_y + y * n_x + x;
+    double avg   = min(sum / (double)n_samples, 1.0);
+    int    index = z * n_x * n_y + y * n_x + x;
     dst[index]   = avg;
+}
+
+extern "C" __global__ void calculate_dielectric_reflection_ratio(float *dst, int32_t n_x, int32_t n_y, int32_t n_z, float *avg_energy_lut)
+{
+    int x = threadIdx.x + blockIdx.x * blockDim.x;
+    int y = threadIdx.y + blockIdx.y * blockDim.y;
+    int z = threadIdx.z + blockIdx.z * blockDim.z;
+
+    int32_t  half_z           = n_z / 2;
+    int32_t  z_t_over_i       = z;
+    int32_t  z_i_over_t       = n_z - 1 - z_t_over_i;
+    float    eta_t_over_eta_i = 0.0;
+
+    if (z < half_z)
+    {
+        // Mirror the first half to make the sequence (1/ior,1.0) and (1.0,ior)
+        float ior_param  = (float)z / (float)(half_z - 1);
+        ior_param        = 1.0 - ior_param;
+        ior_param        = clamp(ior_param, 1.0e-4, 0.999999f);
+        eta_t_over_eta_i = 1.0 / ior_parametrization(ior_param);
+    }
+    else
+    {
+        float ior_param  = (float)(z - half_z) / (float)(half_z - 1);
+        ior_param        = clamp(ior_param, 1.0e-4, 0.999999f);
+        eta_t_over_eta_i = ior_parametrization(ior_param);
+    }
+
+    float eta_i_over_eta_t       = 1.0 / eta_t_over_eta_i;
+    float f_avg_eta_t_over_eta_i = fresnel_average_dielectric(eta_t_over_eta_i);
+    float f_avg_eta_i_over_eta_t = fresnel_average_dielectric(eta_i_over_eta_t);
+    int   e_index_t_over_i       = z_t_over_i * n_x * n_y + y * n_x + x;
+    int   e_index_i_over_t       = z_i_over_t * n_x * n_y + y * n_x + x;
+    float e_avg_eta_t_over_eta_i = avg_energy_lut[e_index_t_over_i];
+    float e_avg_eta_i_over_eta_t = avg_energy_lut[e_index_i_over_t];
+    float factor_1               = (1.0 - f_avg_eta_t_over_eta_i) / max(1.0 - e_avg_eta_i_over_eta_t, 1.0e-12);
+    float factor_2               = eta_t_over_eta_i * eta_t_over_eta_i * (1.0 - f_avg_eta_i_over_eta_t) / max(1.0 - e_avg_eta_t_over_eta_i, 1.0e-12);
+    float num                    = factor_2;
+    float den                    = factor_1 + factor_2;
+    float ratio                  = f_avg_eta_t_over_eta_i * num / den;
+
+    int    index = z * n_x * n_y + y * n_x + x;
+    dst[index]   = ratio;
 }

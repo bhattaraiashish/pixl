@@ -10,7 +10,7 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     }
 
     //------------------------------------------------------------------------
-    // Lobe radiance contribution
+    // Lobe contribution
     metallic                := surface.metallic;
     dielectric              := 1.0 - metallic;
     opaque                  := 1.0 - surface.transmission_weight;
@@ -18,13 +18,24 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     transparent_dielectric  := surface.transmission_weight * dielectric;
 
     //------------------------------------------------------------------------
-    // Surface info initialization
+    // Glossy Specular Params
 
     eta_t_over_eta_i_transparent := surface.specular_ior;
-    eta_t_over_eta_i_opaque      := calculate_specular_ior_for_dielectric_opaque(surface.specular_weight, surface.specular_ior);
-    isotropic_alpha              := microfacet_isotropic_alpha(surface.specular_roughness, true);
+    if (eta_t_over_eta_i_transparent >= 1.0)
+    {
+        eta_t_over_eta_i_transparent = max(eta_t_over_eta_i_transparent, MIN_REASONABLE_IOR);
+    }
+    else
+    {
+        eta_t_over_eta_i_transparent = min(eta_t_over_eta_i_transparent, 1.0 / MIN_REASONABLE_IOR);
+    }
+
+    eta_t_over_eta_i_opaque := calculate_specular_ior_for_dielectric_opaque(surface.specular_weight, eta_t_over_eta_i_transparent);
+    isotropic_alpha         := microfacet_isotropic_alpha(surface.specular_roughness, true);
+    anisotropic_alpha       := microfacet_anisotropic_alpha(surface.specular_roughness, surface.specular_anisotropic, true);
 
     ctx: Shading_Context;
+
     ctx.diffuse.albedo                              = surface.color * opaque_dielectric;
     ctx.diffuse.roughness                           = surface.diffuse_roughness;
     ctx.diffuse.specular_eta_t_over_eta_i           = eta_t_over_eta_i_opaque;
@@ -32,7 +43,7 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     ctx.diffuse.specular_energy_complement_wo_dot_n = read_dielectric_opaque_energy_complement(isotropic_alpha, wo.z, eta_t_over_eta_i_opaque);
     ctx.diffuse.specular_avg_energy_complement      = read_dielectric_opaque_average_energy_complement(isotropic_alpha, eta_t_over_eta_i_opaque);
 
-    ctx.glossy_specular.microfacet_alpha                      = microfacet_anisotropic_alpha(surface.specular_roughness, surface.specular_anisotropic, true);
+    ctx.glossy_specular.microfacet_alpha                      = anisotropic_alpha;
     ctx.glossy_specular.transparent_dielectric_reflect_scale  = transparent_dielectric;
     ctx.glossy_specular.transparent_dielectric_transmit_scale = transparent_dielectric;
     ctx.glossy_specular.opaque_dielectric_reflect_scale       = opaque_dielectric;
@@ -43,12 +54,19 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     ctx.glossy_specular.reflectance                           = surface.reflectance;
     ctx.glossy_specular.falloff                               = surface.falloff;
 
+    ctx.multi_scatter_dielectric.microfacet_alpha             = isotropic_alpha;
+    ctx.multi_scatter_dielectric.eta_t_over_eta_i             = eta_t_over_eta_i_transparent;
+    ctx.multi_scatter_dielectric.energy_complement_wo_dot_n   = read_dielectric_transparent_energy_complement(isotropic_alpha, wo.z, eta_t_over_eta_i_transparent);
+    ctx.multi_scatter_dielectric.reflection_ratio             = read_dielectric_reflection_ratio(isotropic_alpha, eta_t_over_eta_i_transparent);
+    ctx.multi_scatter_dielectric.reflect_scale                = transparent_dielectric * Spectrum_One; // TODO: Use specular_color
+    ctx.multi_scatter_dielectric.transmit_scale               = transparent_dielectric * Spectrum_One; // TODO: Use transmission_color
+
     ctx.multi_scatter_metal.microfacet_alpha           = isotropic_alpha;
     ctx.multi_scatter_metal.average_energy_complement  = 0.0;
     ctx.multi_scatter_metal.energy_complement_wo_dot_n = 0.0;
     ctx.multi_scatter_metal.scale                      = Spectrum_Zero;
 
-    if has_visible_energy_loss(ctx.multi_scatter_metal.microfacet_alpha)
+    if has_visible_energy_loss(ctx.multi_scatter_metal)
     {
         ctx.multi_scatter_metal.average_energy_complement  = read_metal_average_energy_complement(ctx.multi_scatter_metal.microfacet_alpha);
         ctx.multi_scatter_metal.energy_complement_wo_dot_n = read_metal_energy_complement(ctx.multi_scatter_metal.microfacet_alpha, wo.z);
@@ -72,20 +90,11 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
         ctx.weights[it] = estimate_lobe(ctx.info, wo, it.(Lobe_Index));
     }
 
-    ctx.total_weight = 0.0;
-    for ctx.weights
-    {
-        ctx.total_weight += it;
-    }
-
     return ctx;
 }
 
 sample_surface :: (using ctx: Shading_Context, u_sample: Vector3) -> Sample
 {
-    if (ctx.total_weight <= FLOAT32_EPSILON)
-        return make_zero_sample();
-
     u      := clamp_random_sample(u_sample);
     lobe   := pick_lobe(ctx, u.z);
     sample := sample_lobe(info, wo, .{u.x, u.y, lobe.remapped_p}, lobe.index);
@@ -96,27 +105,23 @@ sample_surface :: (using ctx: Shading_Context, u_sample: Vector3) -> Sample
     {
         radiance := sample.weight * sample.pdf;
         pdf      := sample.pdf * weights[lobe.index];
-   
+        
         for 0..LOBE_COUNT-1
         {
             index := it.(Lobe_Index);
             if (index != lobe.index)
             {
-                lobe_pdf := pdf_lobe(info, wo, sample.wi, index);
-                if lobe_pdf > 0.0
-                {
-                    radiance += evaluate_lobe(info, wo, sample.wi, index);
-                    pdf += weights[index] * lobe_pdf;
-                }
+                radiance += evaluate_lobe(info, wo, sample.wi, index);
+                pdf      += weights[index] * pdf_lobe(info, wo, sample.wi, index);
             }
         }
 
-        sample.pdf = pdf / ctx.total_weight;
+        sample.pdf = pdf / lobe.total_weight;
         sample.weight = radiance / sample.pdf;
     }
     else
     {
-        sample.weight *= ctx.total_weight / ctx.weights[lobe.index];
+        sample.weight *= lobe.total_weight / ctx.weights[lobe.index];
     }
 
     return sample;
@@ -126,15 +131,17 @@ sample_surface :: (using ctx: Shading_Context, u_sample: Vector3) -> Sample
 
 Lobe_Index :: enum u32
 {
-    DIFFUSE             :: 0;
-    GLOSSY_SPECULAR     :: 1;
-    MULTI_SCATTER_METAL :: 2;
+    DIFFUSE                  :: 0;
+    GLOSSY_SPECULAR          :: 1;
+    MULTI_SCATTER_DIELECTRIC :: 2;
+    MULTI_SCATTER_METAL      :: 3;
 }
 
 Lobe_Info :: struct
 {
-    index      : Lobe_Index;
-    remapped_p : float;
+    index        : Lobe_Index;
+    remapped_p   : float;
+    total_weight : float;
 }
 
 calculate_specular_ior_for_dielectric_opaque :: (specular_weight: float, eta_t_over_eta_i: float) -> float
@@ -148,7 +155,13 @@ calculate_specular_ior_for_dielectric_opaque :: (specular_weight: float, eta_t_o
 
 pick_lobe :: (ctx: Shading_Context, p: float) -> Lobe_Info
 {
-    p *= ctx.total_weight;
+    total_weight := 0.0;
+    for ctx.weights
+    {
+        total_weight += it;
+    }
+
+    p *= total_weight;
     weights_so_far := 0.0;
     for 0..LOBE_COUNT-2
     {
@@ -156,14 +169,14 @@ pick_lobe :: (ctx: Shading_Context, p: float) -> Lobe_Info
         if (p < weights_so_far + it_lobe_weight)
         {
             remapped_p := clamp_random_number((p - weights_so_far) / it_lobe_weight);
-            return .{it.(Lobe_Index), remapped_p};
+            return .{it.(Lobe_Index), remapped_p, total_weight};
         }
         weights_so_far += it_lobe_weight;
     }
     last        := LOBE_COUNT - 1;
     last_weight := ctx.weights[last];
     remapped_p  := clamp_random_number((p - weights_so_far) / last_weight);
-    return .{last.(Lobe_Index), FLOAT32_ONE_MINUS_EPSILON};
+    return .{last.(Lobe_Index), FLOAT32_ONE_MINUS_EPSILON, total_weight};
 }
 
 evaluate_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Index) -> Spectrum
@@ -174,6 +187,8 @@ evaluate_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Inde
             return evaluate_diffuse(info.diffuse, wo, wi);
         case .GLOSSY_SPECULAR;
             return evaluate_glossy_specular(info.glossy_specular, wo, wi);
+        case .MULTI_SCATTER_DIELECTRIC;
+            return evaluate_multi_scatter_dielectric(info.multi_scatter_dielectric, wo, wi);
         case .MULTI_SCATTER_METAL;
             return evaluate_multi_scatter_metal(info.multi_scatter_metal, wo, wi);
     }
@@ -188,6 +203,8 @@ pdf_lobe :: (info: Shading_Info, wo: Vector3, wi: Vector3, index: Lobe_Index) ->
             return pdf_diffuse(info.diffuse, wo, wi);
         case .GLOSSY_SPECULAR;
             return pdf_glossy_specular(info.glossy_specular, wo, wi);
+        case .MULTI_SCATTER_DIELECTRIC;
+            return pdf_multi_scatter_dielectric(info.multi_scatter_dielectric, wo, wi);
         case .MULTI_SCATTER_METAL;
             return pdf_multi_scatter_metal(info.multi_scatter_metal, wo, wi);
     }
@@ -202,6 +219,8 @@ sample_lobe :: (info: Shading_Info, wo: Vector3, u: Vector3, index: Lobe_Index) 
             return sample_diffuse(info.diffuse, wo, u);
         case .GLOSSY_SPECULAR;
             return sample_glossy_specular(info.glossy_specular, wo, u);
+        case .MULTI_SCATTER_DIELECTRIC;
+            return sample_multi_scatter_dielectric(info.multi_scatter_dielectric, wo, u);
         case .MULTI_SCATTER_METAL;
             return sample_multi_scatter_metal(info.multi_scatter_metal, wo, u);
     }
@@ -216,6 +235,8 @@ estimate_lobe :: (info: Shading_Info, wo: Vector3, index: Lobe_Index) -> float
             return estimate_diffuse(info.diffuse, wo);
         case .GLOSSY_SPECULAR;
             return estimate_glossy_specular(info.glossy_specular, wo);
+        case .MULTI_SCATTER_DIELECTRIC;
+            return estimate_multi_scatter_dielectric(info.multi_scatter_dielectric, wo);
         case .MULTI_SCATTER_METAL;
             return estimate_multi_scatter_metal(info.multi_scatter_metal, wo);
     }
@@ -393,13 +414,13 @@ diffuse_eon_spectrum :: (wo: Vector3, wi: Vector3, albedo: Spectrum, roughness: 
     s         := wo_dot_wi - wi_dot_n * wo_dot_n;
     s_over_t  := ifx (s > 0.0) then (s / max(max(wi_dot_n, wo_dot_n), 1.0e-4)) else s; // FON s/t
     af        := 1.0 / (1.0 + FON1 * roughness);                             // FON A coeff
-    f_ss      := (albedo / PI) * af * (1.0 + roughness * s_over_t);          // single-scatter
+    f_ss      := (albedo * RCP_PI) * af * (1.0 + roughness * s_over_t);          // single-scatter
     efo       := e_fon_approx(wo_dot_n, roughness);                          // FON V albedo
     efi       := e_fon_approx(wi_dot_n, roughness);                          // FON L albedo
     avg_ef    := af * (1.0 + FON2 * roughness);                              // average albedo
     rho_ms    := (albedo * albedo) * avg_ef / (Vector3.{1, 1, 1} - albedo * (1.0 - avg_ef));
     eps       := 1.0e-6;
-    f_ms      := (rho_ms / PI) * max(eps, 1.0 - efo) * max(eps, 1.0 - efi) / max(eps, 1.0 - avg_ef); // multi-scatterlobe
+    f_ms      := (rho_ms * RCP_PI) * max(eps, 1.0 - efo) * max(eps, 1.0 - efi) / max(eps, 1.0 - avg_ef); // multi-scatterlobe
     f         := f_ss + f_ms;
     return f;
 }
@@ -411,39 +432,40 @@ diffuse_eon_spectrum :: (wo: Vector3, wi: Vector3, albedo: Spectrum, roughness: 
 
 evaluate_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3, wi: Vector3) -> Spectrum
 {
-    if is_microfacet_alpha_delta(microfacet_alpha) return Spectrum_Zero;
+    if is_delta_surface(info) return Spectrum_Zero;
 
-    if wi.z > 0.0
+    wo_dot_n := wo.z;
+    wi_dot_n := wi.z;
+
+    if wi_dot_n > 0.0
     {
         wh           := normalize(wo + wi);
-        wo_dot_n     := wo.z;
-        wi_dot_n     := wi.z;
+        wo_dot_wh    := dot(wo, wh);
         dist         := microfacet_ggx_distribution(wh, microfacet_alpha);
         mask_shadow  := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
-        radiance     := dist * mask_shadow / max(4 * wo_dot_n * wi_dot_n, 1.0e-6);
-        wo_dot_wh    := dot(wo, wh);
-        coefficients := calculate_glossy_specular_coefficients(info, wo_dot_wh);
-        weight       := radiance * coefficients.reflect * wi.z;
+        coefficients := calculate_glossy_specular_coefficients(info, abs(wo_dot_wh));
+        factor       := 1.0 / (4 * wo_dot_n);
+        weight       := dist * mask_shadow * coefficients.reflect * factor;
         return weight;
     }
-    else if wi.z < 0.0
+    else if wi_dot_n < 0.0
     {
-        wh               := refracted_normal(wo, wi, eta_t_over_eta_i_transparent);
-        wo_dot_n         := wo.z;
-        wi_dot_n         := -wi.z;
+        wh, ok := refracted_half_vector(wo, wi, eta_t_over_eta_i_transparent);
+        if !ok return Spectrum_Zero;
+        wi_dot_wh        := dot(wi, wh);
         wo_dot_wh        := dot(wo, wh);
-        wi_dot_wh        := -dot(wi, wh);
-        dist             := microfacet_ggx_distribution(wh, microfacet_alpha);
-        mask_shadow      := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
-        dwi_sqrt         := wi_dot_wh + wo_dot_wh / eta_t_over_eta_i_transparent;
-        dwi              := dwi_sqrt * dwi_sqrt;
-        wo_dot_wi_dot_wh := wo_dot_wh * wi_dot_wh;
-        radiance         := (dist * mask_shadow * wo_dot_wi_dot_wh) / max(dwi * wi_dot_n * wo_dot_n, 1.0e-6);
-        coefficients     := calculate_glossy_specular_coefficients(info, wo_dot_wh);
-        weight           := radiance * coefficients.transmit * (-wi.z);
-        // TODO: Only do this for Transport == .RADIANCE
-        weight /= (eta_t_over_eta_i_transparent * eta_t_over_eta_i_transparent);
-        return weight;
+        wo_dot_wi_dot_wh := wi_dot_wh * wo_dot_wh;
+        if (wo_dot_wi_dot_wh < 0.0)
+        {
+            wo_dot_wh    := dot(wo, wh);
+            dist         := microfacet_ggx_distribution(wh, microfacet_alpha);
+            mask_shadow  := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
+            coefficients := calculate_glossy_specular_coefficients(info, abs(wo_dot_wh));
+            dwi          := square(wo_dot_wh + wi_dot_wh * eta_t_over_eta_i_transparent);
+            factor       := square(eta_t_over_eta_i_transparent) * (-wo_dot_wi_dot_wh) / (dwi * wo_dot_n);
+            weight       := dist * mask_shadow * coefficients.transmit * factor;
+            return weight;
+        }
     }
 
     return Spectrum_Zero;
@@ -451,35 +473,43 @@ evaluate_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vecto
 
 pdf_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3, wi: Vector3) -> float
 {
-    if is_microfacet_alpha_delta(info.microfacet_alpha) return 0.0;
+    if is_delta_surface(info) return 0.0;
 
-    if wi.z > 0.0
+    wo_dot_n := wo.z;
+    wi_dot_n := wi.z;
+
+    if wi_dot_n > 0.0
     {
         wh            := normalize(wo + wi);
         wo_dot_wh     := dot(wo, wh);
-        probabilities := calculate_glossy_specular_probabilities(info, wo_dot_wh);
-        wo_dot_n      := wo.z;
-        dist          := microfacet_ggx_distribution(wh, microfacet_alpha);
-        mask          := microfacet_ggx_mask(wo, microfacet_alpha);
-        base_pdf      := dist * mask / max(4 * wo_dot_n, 1.0e-6);
-        pdf           := probabilities.reflect * base_pdf;
-        return pdf;
+        wi_dot_wh     := dot(wi, wh);
+        if wo_dot_wh * wi_dot_wh > 0.0
+        {
+            dist          := microfacet_ggx_distribution(wh, microfacet_alpha);
+            mask          := microfacet_ggx_mask(wo, microfacet_alpha);
+            probabilities := calculate_glossy_specular_probabilities(info, abs(wo_dot_wh));
+            factor        := wo_dot_wh / (4 * wi_dot_wh * wo_dot_n);
+            pdf           := dist * mask * probabilities.reflect * factor;
+            return pdf;
+        }
     }
-    else if wi.z < 0.0
+    else if wi_dot_n < 0.0
     {
-        wh               := refracted_normal(wo, wi, eta_t_over_eta_i_transparent);
+        wh, ok := refracted_half_vector(wo, wi, eta_t_over_eta_i_transparent);
+        if !ok return 0.0;
         wo_dot_wh        := dot(wo, wh);
-        probabilities    := calculate_glossy_specular_probabilities(info, wo_dot_wh);
-        dist             := microfacet_ggx_distribution(wh, microfacet_alpha);
-        mask             := microfacet_ggx_mask(wo, microfacet_alpha);
-        wo_dot_n         := wo.z;
-        wi_dot_wh        := -dot(wi, wh);
-        dwi_sqrt         := wi_dot_wh + wo_dot_wh / eta_t_over_eta_i_transparent;
-        dwi              := dwi_sqrt * dwi_sqrt;
-        wo_dot_wi_dot_wh := wo_dot_wh * wi_dot_wh;
-        base_pdf         := (dist * mask * wo_dot_wi_dot_wh) / max(dwi * wo_dot_n, 1.0e-6);
-        pdf              := probabilities.transmit * base_pdf;
-        return pdf;
+        wi_dot_wh        := dot(wi, wh);
+        wo_dot_wi_dot_wh := wi_dot_wh * wo_dot_wh;
+        if (wo_dot_wi_dot_wh < 0.0)
+        {
+            dist          := microfacet_ggx_distribution(wh, microfacet_alpha);
+            mask          := microfacet_ggx_mask(wo, microfacet_alpha);
+            probabilities := calculate_glossy_specular_probabilities(info, abs(wo_dot_wh));
+            dwi           := square(wo_dot_wh + wi_dot_wh * eta_t_over_eta_i_transparent);
+            factor        := square(eta_t_over_eta_i_transparent) * (-wo_dot_wi_dot_wh) / (dwi * wo_dot_n);
+            pdf           := dist * mask * probabilities.transmit * factor;
+            return pdf;
+        }
     }
 
     return 0.0;
@@ -487,13 +517,18 @@ pdf_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3, w
 
 sample_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3, u: Vector3) -> Sample
 {
-    if !is_microfacet_alpha_delta(microfacet_alpha)
+    if !is_delta_surface(info)
     {
-        wh                          := microfacet_ggx_sample_vndf(wo, microfacet_alpha, u.x, u.y);
-        wo_dot_wh                   := dot(wo, wh);
+        wh        := microfacet_ggx_sample_vndf(wo, microfacet_alpha, u.x, u.y);
+        wo_dot_wh := dot(wo, wh);
+        if wo_dot_wh < 0.0
+        {
+            return make_zero_sample();
+        }
+
         coefficients, probabilities := calculate_glossy_specular_coefficients_and_probabilities(info, wo_dot_wh);
 
-        if (probabilities.total <= FLOAT32_EPSILON)
+        if (probabilities.total == 0.0)
             return make_zero_sample();
 
         if (u.z < probabilities.reflect)
@@ -501,17 +536,16 @@ sample_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3
             wi := reflect(-wo, wh);
             if wi.z > 0.0
             {
-                wo_dot_n     := wo.z;
-                wi_dot_n     := wi.z;
-                dist         := microfacet_ggx_distribution(wh, microfacet_alpha);
-                mask_shadow  := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
-                mask         := microfacet_ggx_mask(wo, microfacet_alpha);
-                radiance     := mask_shadow / max(mask * wi_dot_n, 1.0e-6);
-                base_pdf     := dist * mask / max(4 * wo_dot_n, 1.0e-6);
-
-                weight       := coefficients.reflect * radiance * wi.z / probabilities.reflect;
-                pdf          := probabilities.reflect * base_pdf;
-
+                wo_dot_n    := wo.z;
+                wi_dot_n    := wi.z;
+                wi_dot_wh   := dot(wi, wh);
+                dist        := microfacet_ggx_distribution(wh, microfacet_alpha);
+                mask_shadow := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
+                mask        := microfacet_ggx_mask(wo, microfacet_alpha);
+                shadow      := mask_shadow / mask;
+                weight      := coefficients.reflect * shadow / probabilities.reflect;
+                factor      := wo_dot_wh / (4 * wi_dot_wh * wo_dot_n);
+                pdf         := dist * mask * probabilities.reflect * factor;
                 return make_sample(weight, pdf, wi, .REFLECTION | .GLOSSY);
             }
         }
@@ -520,22 +554,17 @@ sample_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3
             wi, refracted := refract(-wo, wh, eta_t_over_eta_i_transparent);
             if (refracted && wi.z < 0.0)
             {
-                wo_dot_n         := wo.z;
-                wi_dot_n         := -wi.z;
-                wo_dot_wh        := dot(wo, wh);
-                wi_dot_wh        := -dot(wi, wh);
-                dist             := microfacet_ggx_distribution(wh, microfacet_alpha);
-                mask_shadow      := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
-                mask             := microfacet_ggx_mask(wo, microfacet_alpha);
-                dwi_sqrt         := wi_dot_wh + wo_dot_wh / eta_t_over_eta_i_transparent;
-                dwi              := dwi_sqrt * dwi_sqrt;
-                wo_dot_wi_dot_wh := wo_dot_wh * wi_dot_wh;
-                radiance         := mask_shadow / max(mask * wi_dot_n, 1.0e-6);
-                base_pdf         := (dist * mask * wo_dot_wi_dot_wh) / max(dwi * wo_dot_n, 1.0e-6);
-
-                weight           := coefficients.transmit * radiance * (-wi.z) / probabilities.transmit;
-                pdf              := probabilities.transmit * base_pdf;
-
+                wo_dot_n    := wo.z;
+                wo_dot_wh   := dot(wo, wh);
+                wi_dot_wh   := dot(wi, wh);
+                dist        := microfacet_ggx_distribution(wh, microfacet_alpha);
+                mask_shadow := microfacet_ggx_mask_shadow(wo, wi, microfacet_alpha);
+                mask        := microfacet_ggx_mask(wo, microfacet_alpha);
+                shadow      := mask_shadow / mask;
+                weight      := coefficients.transmit * shadow / probabilities.transmit;
+                dwi         := square(wo_dot_wh + wi_dot_wh * eta_t_over_eta_i_transparent);
+                factor      := square(eta_t_over_eta_i_transparent) * abs(wo_dot_wh * wi_dot_wh) / (dwi * wo_dot_n);
+                pdf         := dist * mask * probabilities.transmit * factor;
                 return make_sample(weight, pdf, wi, .TRANSMISSION | .GLOSSY);
             }
         }
@@ -546,7 +575,7 @@ sample_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3
         wo_dot_wh                   := dot(wo, wh);
         coefficients, probabilities := calculate_glossy_specular_coefficients_and_probabilities(info, wo_dot_wh);
 
-        if (probabilities.total <= FLOAT32_EPSILON)
+        if (probabilities.total == 0.0)
             return make_zero_sample();
 
         if (u.z < probabilities.reflect)
@@ -564,8 +593,6 @@ sample_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3
             if (refracted && wi.z < 0.0)
             {
                 weight := coefficients.transmit / probabilities.transmit;
-                // TODO: Only do this for Transport == .RADIANCE
-                weight /= (eta_t_over_eta_i_transparent * eta_t_over_eta_i_transparent);
                 return make_sample(weight, 1.0, wi, .TRANSMISSION | .SPECULAR);
             }
         }
@@ -576,27 +603,18 @@ sample_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3
 
 estimate_glossy_specular :: (using info: Glossy_Specular_Shading_Info, wo: Vector3) -> float
 {
-    if !is_microfacet_alpha_delta(microfacet_alpha)
-    {
-        mask         := microfacet_ggx_mask(wo, microfacet_alpha);
-        coefficients := calculate_glossy_specular_coefficients(info, wo.z);
-        estimate     := max_spectrum(coefficients.reflect + coefficients.transmit) * mask;
-        return estimate;
-    }
-    else
-    {
-        coefficients := calculate_glossy_specular_coefficients(info, wo.z);
-        estimate     := max_spectrum(coefficients.reflect + coefficients.transmit);
-        return estimate;
-    }
+    coefficients := calculate_glossy_specular_coefficients(info, wo.z);
+    estimate     := max_spectrum(coefficients.reflect + coefficients.transmit);
+    return estimate;
 }
 
 #scope_file
 
-is_microfacet_alpha_delta :: (microfacet_alpha: Vector2) -> bool
+refracted_half_vector :: (wo: Vector3, wi: Vector3, eta_t_over_eta_i: float) -> Vector3, bool
 {
-    delta := max(microfacet_alpha.x, microfacet_alpha.y) < 1.0e-3;
-    return delta;
+    wh := -normalize(wo + eta_t_over_eta_i * wi);
+    ok := (eta_t_over_eta_i >= 1.0 && wh.z > 0.0) || (eta_t_over_eta_i < 1.0 && wh.z < 0.0);
+    return wh, ok;
 }
 
 Glossy_Specular_Coefficient :: struct
@@ -658,16 +676,130 @@ calculate_glossy_specular_probabilities :: (using info: Glossy_Specular_Shading_
 }
 
 //------------------------------------------------------------------------
+// Multi Scatter Dielectric BSDF
+
+#scope_export
+
+evaluate_multi_scatter_dielectric :: (using info: Multi_Scatter_Dielectric_Shading_Info, wo: Vector3, wi: Vector3) -> Spectrum
+{
+    if has_visible_energy_loss(info)
+    {
+        clamped_weight := calculate_multi_scatter_dielectric_energy(info, wi, true);
+        if wi.z > 0.0
+        {
+            weight := reflect_scale * clamped_weight * wi.z * RCP_PI;
+            return weight;
+        }
+        else if wi.z < 0.0
+        {
+            weight := transmit_scale * clamped_weight * (-wi.z) * RCP_PI;
+            return weight;
+        }
+    }
+    return Spectrum_Zero;
+}
+
+pdf_multi_scatter_dielectric :: (using info: Multi_Scatter_Dielectric_Shading_Info, wo: Vector3, wi: Vector3) -> float
+{
+    if has_visible_energy_loss(info)
+    {
+        if wi.z > 0.0
+        {
+            pdf := reflection_ratio * pdf_cosine(wi);
+            return pdf;
+        }
+        else if wi.z < 0.0
+        {
+            pdf := (1.0 - reflection_ratio) * pdf_cosine(.{wi.x, wi.y, -wi.z});
+            return pdf;
+        }
+    }
+    return 0.0;
+}
+
+sample_multi_scatter_dielectric :: (using info: Multi_Scatter_Dielectric_Shading_Info, wo: Vector3, u: Vector3) -> Sample
+{
+    if has_visible_energy_loss(info)
+    {
+        wi := sample_cosine(u.x, u.y);
+        if wi.z != 0.0
+        {
+            pdf := pdf_cosine(wi);
+            if (u.z < reflection_ratio)
+            {
+                clamped_weight := calculate_multi_scatter_dielectric_energy(info, wi, false);
+                weight         := reflect_scale * clamped_weight * wi.z * RCP_PI / pdf;
+                return make_sample(weight, reflection_ratio * pdf, wi, .REFLECTION | .GLOSSY);
+            }
+            else
+            {
+                wi.z            = -wi.z;
+                clamped_weight := calculate_multi_scatter_dielectric_energy(info, wi, false);
+                weight         := transmit_scale * clamped_weight * (-wi.z) * RCP_PI / pdf;
+                return make_sample(weight, (1.0 - reflection_ratio) * pdf, wi, .TRANSMISSION | .GLOSSY);
+            }
+        }
+    }
+    return make_zero_sample();
+}
+
+estimate_multi_scatter_dielectric :: (using info: Multi_Scatter_Dielectric_Shading_Info, wo: Vector3) -> float
+{
+    if has_visible_energy_loss(info)
+    {
+        weight   := reflect_scale * reflection_ratio + transmit_scale * (1.0 - reflection_ratio);
+        estimate := max_spectrum(weight) * energy_complement_wo_dot_n;
+        return estimate;
+    }
+    return 0.0;
+}
+
+#scope_file
+
+calculate_multi_scatter_dielectric_energy :: (using info: Multi_Scatter_Dielectric_Shading_Info, wi: Vector3, $apply_ratio: bool) -> float
+{
+    // Based on: https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
+    // ratio * (1 - E(wi)) * (1 - E(wo)) / (PI * (1 - E_avg))
+
+    effective_ior, effective_ratio: float;
+    wi_dot_n := wi.z;
+
+    if wi_dot_n > 0.0
+    {
+        effective_ior   = eta_t_over_eta_i;
+        effective_ratio = reflection_ratio;
+    }
+    else
+    {
+        wi_dot_n = -wi_dot_n;
+        effective_ior   = 1.0 / eta_t_over_eta_i;
+        effective_ratio = 1.0 - reflection_ratio;
+    }
+
+    energy_complement_wi_dot_n := read_dielectric_transparent_energy_complement(microfacet_alpha, wi_dot_n, effective_ior);
+    average_energy_complement  := read_dielectric_transparent_average_energy_complement(microfacet_alpha, effective_ior);
+    unscaled_weight            := energy_complement_wo_dot_n * energy_complement_wi_dot_n / max(average_energy_complement, 1.0e-6);
+
+    #if apply_ratio
+    {
+        unscaled_weight *= effective_ratio;
+    }
+
+    clamped_weight := min(unscaled_weight, sdiv(1.0, wi_dot_n));
+    return clamped_weight;
+}
+
+//------------------------------------------------------------------------
 // Multi Scatter Metal BRDF
 
 #scope_module
 
 evaluate_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, wo: Vector3, wi: Vector3) -> Spectrum
 {
-    if (has_visible_energy_loss(microfacet_alpha) && wi.z > 0.0)
+    if has_visible_energy_loss(info) && wi.z > 0.0
     {
         clamped_weight := calculate_multi_scatter_metal_energy(info, wi);
-        weight         := scale * clamped_weight * wi.z;
+        weight         := scale * clamped_weight * wi.z * RCP_PI;
         return weight;
     }
     return Spectrum_Zero;
@@ -675,7 +807,7 @@ evaluate_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, w
 
 pdf_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, wo: Vector3, wi: Vector3) -> float
 {
-    if (has_visible_energy_loss(microfacet_alpha))
+    if has_visible_energy_loss(info)
     {
         pdf := pdf_cosine(wi);
         return pdf;
@@ -685,16 +817,15 @@ pdf_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, wo: Ve
 
 sample_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, wo: Vector3, u: Vector3) -> Sample
 {
-    if (has_visible_energy_loss(microfacet_alpha))
+    if has_visible_energy_loss(info)
     {
         wi := sample_cosine(u.x, u.y);
         if (wi.z > 0.0)
         {
-            wi_energy_complement := read_metal_energy_complement(microfacet_alpha, wi.z);
-            pdf                  := pdf_cosine(wi);
-            clamped_weight       := calculate_multi_scatter_metal_energy(info, wi);
-            weight               := scale * clamped_weight * wi.z / pdf;
-            return make_sample(weight, pdf, wi, .REFLECTION | .DIFFUSE);
+            pdf            := pdf_cosine(wi);
+            clamped_weight := calculate_multi_scatter_metal_energy(info, wi);
+            weight         := scale * clamped_weight * wi.z * RCP_PI / pdf;
+            return make_sample(weight, pdf, wi, .REFLECTION | .GLOSSY);
         }
     }
     return make_zero_sample();
@@ -702,7 +833,7 @@ sample_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, wo:
 
 estimate_multi_scatter_metal :: (using info: Multi_Scatter_Metal_Shading_Info, wo: Vector3) -> float
 {
-    if (has_visible_energy_loss(microfacet_alpha))
+    if has_visible_energy_loss(info)
     {
         estimate := max_spectrum(scale) * energy_complement_wo_dot_n;
         return estimate;
@@ -717,274 +848,58 @@ calculate_multi_scatter_metal_energy :: (using info: Multi_Scatter_Metal_Shading
     // Based on: https://blog.selfshadow.com/publications/s2017-shading-course/imageworks/s2017_pbs_imageworks_slides_v2.pdf
     // (1 - E(wi)) * (1 - E(wo)) / (PI * (1 - E_avg))
     energy_complement_wi_dot_n := read_metal_energy_complement(microfacet_alpha, wi.z);
-    unscaled_weight            := energy_complement_wi_dot_n * energy_complement_wo_dot_n / max(PI * average_energy_complement, 1.0e-6);
+    unscaled_weight            := energy_complement_wi_dot_n * energy_complement_wo_dot_n / max(average_energy_complement, 1.0e-6);
     // Prevent weights from getting out of control near grazing angles at low roughnesses
     clamped_weight             := min(unscaled_weight, sdiv(1.0, wi.z));
     return clamped_weight;
 }
 
-////------------------------------------------------------------------------
-//// Glossy Diffuse
-
-////------------------------------------------------------------------------
-//// Dielectric Translucent
-
-//evaluate_dielectric :: (V: Vector3, L: Vector3, surface: Surface, transport: Transport) -> BSDF
-//{
-//    alpha := surface.microfacet_alpha;
-//    ior   := surface.specular_ior;
-
-//    if ior != 1.0 && !microfacet_is_delta(alpha)
-//    {
-//        if (L.z > 0.0)
-//        {
-//            H    := normalize(V + L);
-//            VoH  := dot(V, H);
-//            F    := fresnel_dielectric(ior, VoH);
-//            brdf := evaluate_ggx_specular_reflect(V, L, H, alpha);
-//            f    := F * surface.edge_tint * brdf.f;
-//            pdf  := F * brdf.pdf;
-//            return .{f, pdf};
-//        }
-//        else if (L.z < 0.0)
-//        {
-//            H    := refracted_normal(V, L, ior);
-//            VoH  := dot(V, H);
-//            F    := fresnel_dielectric(ior, VoH);
-//            btdf := evaluate_ggx_specular_refract(V, L, H, alpha, ior);
-//            f    := (1.0 - F) * btdf.f / (ior * ior);
-//            pdf  := (1.0 - F) * btdf.pdf;
-//            return .{f, pdf};
-//        }
-//    }
-//    return .{};
-//}
-
-//sample_dielectric :: (V: Vector3, surface: Surface, p: float, u: Vector2) -> Sampled_BSDF
-//{
-//    alpha := surface.microfacet_alpha;
-//    ior   := surface.specular_ior;
-
-//    if ior == 1 || microfacet_is_delta(alpha)
-//    {
-//        H := Vector3.{0, 0, 1};
-//        F := fresnel_dielectric(ior, dot(V, H));
-
-//        if (p >= F)
-//        {
-//            L, refracted := refract(-V, H, ior);
-//            if (refracted)
-//            {
-//                f   := (1.0 - F) * Spectrum_One / max(ior * ior * abs(L.z), 1.0e-6);
-//                pdf := 1.0 - F;
-//                return sampled_bsdf(f, pdf, L, ._TRANSMISSION | ._GLOSSY);
-//            }
-//            else
-//            {
-//                F = 1.0;
-//            }
-//        }
-
-//        L := reflect(-V, H);
-//        if (L.z > 0.0)
-//        {
-//            f    := F * Spectrum_One / max(L.z, 1.0e-6);
-//            pdf  := F;
-//            return sampled_bsdf(f, pdf, L, ._REFLECTION | ._SPECULAR);
-//        }
-//    }
-//    else
-//    {
-//        L, H : Vector3;
-
-//        do_reflection := true;
-
-//        rough := sqrt(sqrt(alpha.x * alpha.y));
-//        P_ss  := estimate_dielectric_single_scatter(rough, ior);
-//        P_ms  := 1.0 - P_ss;
-//        F_ss  := 0.0;
-//        F_ms  := fresnel_average_dielectric(ior);
-
-//        if (p < P_ss)
-//        {
-//            //print("ggx!?\n");
-//            p    = p / P_ss;
-//            H    = microfacet_ggx_sample_vndf(V, alpha, u.x, u.y);
-//            F_ss = fresnel_dielectric(ior, dot(V, H));
-
-//            if (p >= F_ss)
-//            {
-//                refracted: bool;
-//                L, refracted = refract(-V, H, ior);
-//                if (refracted)
-//                {
-//                    do_reflection = false;
-//                }
-//                else
-//                {
-//                    F_ss = 1.0;
-//                    L    = reflect(-V, H);
-//                }
-//            }
-//            else
-//            {
-//                L = reflect(-V, H);
-//            }
-//        }
-//        else
-//        {
-//            L = sample_cosine(u.x, u.y);
-//            p = (p - P_ss) / P_ms;
-
-//            if (p < F_ms)
-//            {
-//                H = normalize(V + L);
-//            }
-//            else
-//            {
-//                L.z       = -L.z;
-//                H         = refracted_normal(V, L, ior);
-//                do_reflection = false;
-//            }
-
-//            F_ss = fresnel_dielectric(ior, dot(V, H));
-//        }
-
-//        f_ms  := multi_scatter_dielectric_contribution(do_reflection, rough, V.z, abs(L.z), ior);
-
-//        if (do_reflection && L.z > 0.0)
-//        {
-//            brdf   := evaluate_ggx_specular_reflect(V, L, H, alpha);
-//            f_ss   := F_ss * brdf.f;
-//            pdf_ss := F_ss * brdf.pdf;
-//            pdf_ms := F_ms * pdf_cosine(L);
-//            f      := f_ms + f_ss;
-//            pdf    := P_ss * pdf_ss + P_ms * pdf_ms;
-//            return sampled_bsdf(f, pdf, L, ._REFLECTION | ._GLOSSY);
-//        }
-//        else if (!do_reflection && L.z < 0.0)
-//        {
-//            //print("transmission!?\n");
-//            btdf   := evaluate_ggx_specular_refract(V, L, H, alpha, ior);
-//            f_ss   := (1.0 - F_ss) * btdf.f / (ior * ior);
-//            pdf_ss := (1.0 - F_ss) * btdf.pdf;
-//            pdf_ms := (1.0 - F_ms) * pdf_cosine(L);
-//            f      := f_ms + f_ss;
-//            pdf    := P_ss * pdf_ss + P_ms * pdf_ms;
-//            return sampled_bsdf(f, pdf, L, ._TRANSMISSION | ._GLOSSY);
-//        }
-//    }
-//    return .{};
-//}
-
-//#scope_file
-
-//estimate_dielectric_single_scatter :: (rough: float, ior: float) -> float
-//{
-//    //return 0.0;
-//    E_avg_table  := dielectric_full_E_avg;
-//    physical_ior := ior;
-//    if (ior < 1.0)
-//    {
-//        E_avg_table  = dielectric_full_inv_E_avg;
-//        physical_ior = 1.0 / ior;
-//    }
-//    param_ior := ior_inverse_parametrization(physical_ior);
-//    E_avg     := read_table_2D(E_avg_table, DIELECTRIC_FULL_E_AVG_SIZE, DIELECTRIC_FULL_E_AVG_SIZE, rough, param_ior);
-//    return E_avg;
-//}
-
-//multi_scatter_dielectric_contribution :: (do_reflection: bool, rough: float, NoV: float, NoL: float, ior: float) -> Spectrum
-//{
-//    ior_1        := ior;
-//    ior_2        := 1.0 / ior_1;
-//    physical_ior := max(ior_1, ior_2);
-//    param_ior    := ior_inverse_parametrization(physical_ior);
-
-//    E_table_1, E_table_2: []float;
-//    E_avg_1, E_avg_2: float;
-
-//    if (ior >= 1.0)
-//    {
-//        E_table_1 = dielectric_full_E;
-//        E_table_2 = dielectric_full_inv_E;
-//        E_avg_1   = read_table_2D(dielectric_full_E_avg, DIELECTRIC_FULL_E_AVG_SIZE, DIELECTRIC_FULL_E_AVG_SIZE, rough, param_ior);
-//        E_avg_2   = read_table_2D(dielectric_full_inv_E_avg, DIELECTRIC_FULL_E_AVG_SIZE, DIELECTRIC_FULL_E_AVG_SIZE, rough, param_ior);
-//    }
-//    else
-//    {
-//        E_table_1 = dielectric_full_inv_E;
-//        E_table_2 = dielectric_full_E;
-//        E_avg_1   = read_table_2D(dielectric_full_inv_E_avg, DIELECTRIC_FULL_E_AVG_SIZE, DIELECTRIC_FULL_E_AVG_SIZE, rough, param_ior);
-//        E_avg_2   = read_table_2D(dielectric_full_E_avg, DIELECTRIC_FULL_E_AVG_SIZE, DIELECTRIC_FULL_E_AVG_SIZE, rough, param_ior);
-//    }
-
-//  //  print("%, %\n", E_avg_1, E_avg_2);
-
-//  //  return .{E_avg_1, E_avg_1, E_avg_1};
-
-//    F_1 := fresnel_average_dielectric(ior_1);
-//    F_2 := fresnel_average_dielectric(ior_2);
-
-//    num       := (1.0 - F_2) * (1.0 - E_avg_2) * ior_1 * ior_1;
-//    den       := (1.0 - F_1) * (1.0 - E_avg_1) + num;
-//    ratio     := num / den;
-
-//    //ratio = 1.0;//nocheckin
-
-//    E_table_v := E_table_1;
-//    E_table_l := E_table_1;
-//    E_avg_l   := E_avg_1;
-
-//    if (!do_reflection)
-//    {
-//        ratio     = 1.0 - ratio;
-//        E_table_l = E_table_2;
-//        E_avg_l   = E_avg_2;
-//    }
-
-//    if (E_avg_l < 1.0)
-//    {
-//        //print("E_avg: %\n", E_avg_l);
-//        E_v   := read_table_3D(E_table_v, DIELECTRIC_FULL_E_SIZE, DIELECTRIC_FULL_E_SIZE, DIELECTRIC_FULL_E_SIZE, rough, NoV, param_ior);
-//        E_l   := read_table_3D(E_table_l, DIELECTRIC_FULL_E_SIZE, DIELECTRIC_FULL_E_SIZE, DIELECTRIC_FULL_E_SIZE, rough, NoL, param_ior);
-//        f_ms  := ratio * (1.0 - E_v) * (1.0 - E_l) / (PI * (1.0 - E_avg_l));
-//        //print("f_ms: %\n", f_ms);
-//        return Spectrum.{f_ms, f_ms, f_ms};
-//    }
-
-//    return Spectrum_Zero;
-//}
-
-////------------------------------------------------------------------------
-//// Geometry Transmission BTDF
-
-//evaluate_ambient :: (V: Vector3, L: Vector3, surface: Surface, transport: Transport) -> BSDF
-//{
-//    return .{};
-//}
-
-//sample_ambient :: (V: Vector3, surface: Surface, p: float, u: Vector2) -> Sampled_BSDF
-//{
-//    L   := -V;
-//    mu  := abs(L.z);
-//    f   := Spectrum_Zero;
-//    if (mu > 0.0)
-//    {
-//        f = Spectrum_One / mu;
-//    }
-//    pdf := 1.0;
-//    return .{};
-//    //return .{f.weight.diffuse, pdf, L, ._TRANSMISSION};
-//}
-
 #scope_file
 
-has_visible_energy_loss :: inline (alpha: float) -> bool
+MIN_REASONABLE_IOR                     :: 1.001;
+PASS_THROUGH_IOR_EPSILON               :: 1.0e-2;
+MIN_ROUGHNESS_WITH_VISIBLE_ENERGY_LOSS :: 0.04; // From Adobe's OpenPBR BSDF
+MIN_ALPHA_WITH_VISIBLE_ENERGY_LOSS     :: MIN_ROUGHNESS_WITH_VISIBLE_ENERGY_LOSS * MIN_ROUGHNESS_WITH_VISIBLE_ENERGY_LOSS;
+
+has_visible_energy_loss :: (using info: Multi_Scatter_Dielectric_Shading_Info) -> bool
 {
-    MIN_ROUGHNESS_WITH_VISIBLE_ENERGY_LOSS :: 0.04;
-    MIN_ALPHA_WITH_VISIBLE_ENERGY_LOSS     :: MIN_ROUGHNESS_WITH_VISIBLE_ENERGY_LOSS * MIN_ROUGHNESS_WITH_VISIBLE_ENERGY_LOSS;
-    return alpha >= MIN_ALPHA_WITH_VISIBLE_ENERGY_LOSS;
+    pass_through := is_pass_through_medium(eta_t_over_eta_i);
+    smooth       := is_smooth_surface(microfacet_alpha);
+    energy_loss  := !(pass_through || smooth);
+    return energy_loss;
+}
+
+has_visible_energy_loss :: (using info: Multi_Scatter_Metal_Shading_Info) -> bool
+{
+    metallic    := max_spectrum(scale) > 0.0;
+    smooth      := is_smooth_surface(microfacet_alpha);
+    energy_loss := metallic && !smooth;
+    return energy_loss;
+}
+
+is_delta_surface :: (using info: Glossy_Specular_Shading_Info) -> bool
+{
+    smooth       := is_smooth_surface(max(microfacet_alpha.x, microfacet_alpha.y));
+    pass_through := (metal_scale == 0.0 && is_pass_through_medium(eta_t_over_eta_i_transparent));
+    delta        := smooth || pass_through;
+    return delta;
+}
+
+is_smooth_surface :: (alpha: float) -> bool
+{
+    return alpha < MIN_ALPHA_WITH_VISIBLE_ENERGY_LOSS;
+}
+
+is_pass_through_medium :: (eta_t_over_eta_i: float) -> bool
+{
+    return abs(eta_t_over_eta_i - 1.0) <= PASS_THROUGH_IOR_EPSILON;
+}
+
+//------------------------------------------------------------------------
+
+square :: inline (x: $T) -> T
+{
+    return x * x;
 }
 
 sdiv :: inline (x: $T, y: T) -> T
@@ -994,16 +909,6 @@ sdiv :: inline (x: $T, y: T) -> T
         return x/y;
     }
     return 0;
-}
-
-refracted_normal :: inline (wo: Vector3, wi: Vector3, eta_t_over_eta_i: float) -> Vector3
-{
-    wh := normalize(wo + eta_t_over_eta_i * wi);
-    if (wh.z < 0.0)
-    {
-        wh = -wh;
-    }
-    return wh;
 }
 
 FLOAT32_EPSILON :: 0h34000000;
