@@ -42,9 +42,9 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     ctx.diffuse.specular_avg_energy_complement      = read_dielectric_opaque_average_energy_complement(isotropic_alpha, eta_t_over_eta_i_opaque);
 
     ctx.glossy_specular.microfacet_alpha                      = anisotropic_alpha;
-    ctx.glossy_specular.transparent_dielectric_reflect_scale  = transparent_dielectric;
-    ctx.glossy_specular.transparent_dielectric_transmit_scale = transparent_dielectric;
-    ctx.glossy_specular.opaque_dielectric_reflect_scale       = opaque_dielectric;
+    ctx.glossy_specular.transparent_dielectric_reflect_scale  = transparent_dielectric * surface.specular_color;
+    ctx.glossy_specular.transparent_dielectric_transmit_scale = transparent_dielectric * Spectrum_One;
+    ctx.glossy_specular.opaque_dielectric_reflect_scale       = opaque_dielectric * surface.specular_color;
     ctx.glossy_specular.eta_t_over_eta_i_transparent          = eta_t_over_eta_i_transparent;
     ctx.glossy_specular.eta_t_over_eta_i_opaque               = eta_t_over_eta_i_opaque;
 
@@ -56,8 +56,8 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     ctx.multi_scatter_dielectric.eta_t_over_eta_i             = eta_t_over_eta_i_transparent;
     ctx.multi_scatter_dielectric.energy_complement_wo_dot_n   = read_dielectric_transparent_energy_complement(isotropic_alpha, wo.z, eta_t_over_eta_i_transparent);
     ctx.multi_scatter_dielectric.reflection_ratio             = read_dielectric_reflection_ratio(isotropic_alpha, eta_t_over_eta_i_transparent);
-    ctx.multi_scatter_dielectric.reflect_scale                = transparent_dielectric * Spectrum_One; // TODO: Use specular_color
-    ctx.multi_scatter_dielectric.transmit_scale               = transparent_dielectric * Spectrum_One; // TODO: Use transmission_color
+    ctx.multi_scatter_dielectric.reflect_scale                = transparent_dielectric * surface.specular_color;
+    ctx.multi_scatter_dielectric.transmit_scale               = transparent_dielectric * Spectrum_One;
 
     ctx.multi_scatter_metal.microfacet_alpha           = isotropic_alpha;
     ctx.multi_scatter_metal.average_energy_complement  = 0.0;
@@ -79,8 +79,8 @@ prepare_surface :: (surface: Surface, wo: Vector3) -> Shading_Context
     }
 
     ctx.ambient.alpha = surface.geometry_opacity;
-
-    ctx.wo = wo;
+    ctx.volume        = prepare_volume(surface);
+    ctx.wo            = wo;
 
     //------------------------------------------------------------------------
     // Lobe PDF Weights
@@ -172,6 +172,39 @@ sample_base_surface :: (using info: Base_Shading_Info, wo: Vector3, u: Vector3) 
 }
 
 #scope_module
+
+prepare_volume :: (surface: Surface) -> Volume_Info
+{
+    MIN_TRANSMISSION_DEPTH :: 1.0e-3;
+    MIN_TRANSMISSION_COLOR :: 1.0e-3;
+
+    volume: Volume_Info;
+
+    if (surface.transmission_depth <= 0.0)
+    {
+        return volume;
+    }
+
+    depth          := max(surface.transmission_depth, MIN_TRANSMISSION_DEPTH);
+    color          := max(surface.transmission_color, make_spectrum(MIN_TRANSMISSION_COLOR));
+    rcp_depth      := 1.0 / depth;
+    extinction     := -log(color) * rcp_depth;
+    scattering     := color * rcp_depth;
+    absorption     := extinction - scattering;
+
+    min_absorption := min(absorption.x, absorption.y, absorption.z);
+    if min_absorption < 0.0
+    {
+        absorption -= make_spectrum(min_absorption);
+    }
+
+    volume.extinction = absorption + scattering;
+    volume.albedo.x   = ifx volume.extinction.x > 0.0 scattering.x / volume.extinction.x;
+    volume.albedo.y   = ifx volume.extinction.y > 0.0 scattering.y / volume.extinction.y;
+    volume.albedo.z   = ifx volume.extinction.z > 0.0 scattering.z / volume.extinction.z;
+
+    return volume;
+}
 
 Base_Lobe_Index :: enum u32
 {

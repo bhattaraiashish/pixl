@@ -111,6 +111,7 @@ Test_Scene :: enum
     glossy_diffuse_test;
     glass_test_1;
     glass_test_2;
+    glass_test_3;
     envmap_test;
 }
 
@@ -262,8 +263,6 @@ load_test_scene :: (using scene: *Scene, type: Test_Scene)
             material.specular_anisotropic = create_constant_texture(0.0);
             //material.specular_ior         = create_constant_texture(0.1);
             material.transmission_weight         = create_constant_texture(0.0);
-            material.absorption           = create_constant_texture(.{0.7, 0.3, 0.7});
-            material.absorption_strength  = create_constant_texture(1.0);
 
             white      := create_lambertian_material(scene, create_constant_texture(.{1, 1, 1}));
             red        := create_lambertian_material(scene, create_constant_texture(.{0.65, 0.05, 0.05}));
@@ -339,6 +338,7 @@ load_test_scene :: (using scene: *Scene, type: Test_Scene)
                 material.specular_ior         = create_constant_texture(specular_ior);
                 material.specular_roughness   = create_constant_texture(roughness);
                 material.specular_anisotropic = create_constant_texture(0.0);
+                material.specular_color       = create_constant_texture(Vector3.{0.0, 0.9, 0.3});
                 material.specular_weight      = create_constant_texture(1.0);
             }
             test_scene(scene, glossy_diffuse_parameter);
@@ -354,14 +354,14 @@ load_test_scene :: (using scene: *Scene, type: Test_Scene)
             test_scene(scene, glossy_diffuse_parameter);
 
         case .glass_test_1;
-            specular_reflection_parameter :: (material: *Material, x: int, y: int, specular_t: float, roughness: float)
+            specular_transmission_parameter :: (material: *Material, x: int, y: int, specular_t: float, roughness: float)
             {
                 specular_ior                 := lerp(1.0, 3.0, specular_t);
                 material.specular_ior        = create_constant_texture(specular_ior);
                 material.specular_roughness  = create_constant_texture(roughness);
                 material.transmission_weight = create_constant_texture(1.0);
             }
-            test_scene(scene, specular_reflection_parameter);
+            test_scene(scene, specular_transmission_parameter);
 
         case .glass_test_2;
             specular_transmission_parameter :: (material: *Material, x: int, y: int, roughness: float, anisotropic: float)
@@ -370,6 +370,18 @@ load_test_scene :: (using scene: *Scene, type: Test_Scene)
                 material.specular_anisotropic = create_constant_texture(anisotropic);
                 material.specular_ior         = create_constant_texture(1.5);
                 material.transmission_weight  = create_constant_texture(1.0);
+            }
+            test_scene(scene, specular_transmission_parameter);
+            
+        case .glass_test_3;
+            specular_transmission_parameter :: (material: *Material, x: int, y: int, depth: float, unused: float)
+            {
+                material.specular_ior         = create_constant_texture(1.55);
+                material.transmission_weight  = create_constant_texture(1.0);
+                material.transmission_color   = create_constant_texture(Vector3.{0.90, 0.55, 0.05});
+                material.transmission_scatter = create_constant_texture(Vector3.{0.0, 0.0, 0.0});
+                //material.transmission_scatter = create_constant_texture(Vector3.{0.30, 0.15, 0.01}); // TODO: Support scattering
+                material.transmission_depth   = create_constant_texture(depth);
             }
             test_scene(scene, specular_transmission_parameter);
 
@@ -465,32 +477,38 @@ add_mesh :: (scene: *Scene, xform: Matrix4, mesh: Primitive_Mesh, material_id: M
     primitive.material_id = material_id;
 }
 
+init_default_material :: (using material: *Material)
+{
+    color                = create_constant_texture(Spectrum.{0.8, 0.8, 0.8});
+    diffuse_roughness    = create_constant_texture(0.0);
+
+    specular_ior         = create_constant_texture(1.5);
+    specular_weight      = create_constant_texture(1.0);
+    specular_roughness   = create_constant_texture(0.3);
+    specular_anisotropic = create_constant_texture(0.0);
+    specular_color       = create_constant_texture(Spectrum.{1.0, 1.0, 1.0});
+
+    transmission_weight  = create_constant_texture(0.0);
+    transmission_color   = create_constant_texture(Spectrum.{1, 1, 1});
+    transmission_depth   = create_constant_texture(0.0);
+    transmission_scatter = create_constant_texture(Spectrum.{0, 0, 0});
+
+    metallic             = create_constant_texture(0.0);
+    reflectance          = create_constant_texture(Spectrum.{0.8, 0.8, 0.8});
+    edge_tint            = create_constant_texture(Spectrum.{1.0, 1.0, 1.0});
+    falloff              = create_constant_texture(Spectrum.{0, 0, 0});
+
+    geometry_opacity     = create_constant_texture(1.0);
+
+    emission_strength    = create_constant_texture(0.0);
+    emission_color       = create_constant_texture(.{1.0, 1.0, 1.0});
+}
+
 create_material :: (scene: *Scene) -> MaterialID, *Material
 {
     id       := scene.materials.count.(MaterialID);
     material := array_add(*scene.materials);
-
-    material.color = create_constant_texture(Vector3.{0.8, 0.8, 0.8});
-    material.diffuse_roughness = create_constant_texture(0.0);
-    material.specular_ior = create_constant_texture(1.5);
-    material.specular_weight = create_constant_texture(1.0);
-    material.transmission_weight = create_constant_texture(0.0);
-
-    material.specular_roughness = create_constant_texture(0.0);
-    material.specular_anisotropic = create_constant_texture(0.0);
-
-    material.metallic = create_constant_texture(0.0);
-    material.reflectance = create_constant_texture(Vector3.{0.8, 0.8, 0.8});
-    material.edge_tint = create_constant_texture(Vector3.{1.0, 1.0, 1.0});
-    material.falloff = create_constant_texture(Vector3.{0, 0, 0});
-
-    material.geometry_opacity = create_constant_texture(1.0);
-
-    material.absorption_strength = create_constant_texture(0.0);
-    material.absorption = create_constant_texture(.{1.0, 1.0, 1.0});
-    material.emission_strength = create_constant_texture(0.0);
-    material.emission_color = create_constant_texture(.{1.0, 1.0, 1.0});
-
+    init_default_material(material);
     return id, material;
 }
 
@@ -1237,8 +1255,6 @@ SampleTextureSpectrum :: (texture: Texture2D, u: float, v: float) -> Spectrum
 
 material_surface :: (material: Material, hit: Hit_Info) -> Surface
 {
-    absorption_strength  := SampleAlpha(material.absorption_strength, hit.u, hit.v);
-    absorption           := SampleTextureSpectrum(material.absorption, hit.u, hit.v);
     emission_strength    := SampleAlpha(material.emission_strength, hit.u, hit.v);
     emission_color       := SampleTextureSpectrum(material.emission_color, hit.u, hit.v);
 
@@ -1248,18 +1264,19 @@ material_surface :: (material: Material, hit: Hit_Info) -> Surface
     surface.diffuse_roughness    = SampleAlpha(material.diffuse_roughness, hit.u, hit.v);
     surface.specular_ior         = SampleAlpha(material.specular_ior, hit.u, hit.v);
     surface.specular_weight      = SampleAlpha(material.specular_weight, hit.u, hit.v);
-    surface.transmission_weight  = SampleAlpha(material.transmission_weight, hit.u, hit.v);
-
     surface.specular_roughness   = SampleAlpha(material.specular_roughness, hit.u, hit.v);
     surface.specular_anisotropic = SampleAlpha(material.specular_anisotropic, hit.u, hit.v);
-
+    surface.specular_color       = SampleTextureSpectrum(material.specular_color, hit.u, hit.v);
+    surface.transmission_weight  = SampleAlpha(material.transmission_weight, hit.u, hit.v);
+    surface.transmission_color   = SampleTextureSpectrum(material.transmission_color, hit.u, hit.v);
+    surface.transmission_depth   = SampleAlpha(material.transmission_depth, hit.u, hit.v);
+    surface.transmission_scatter = SampleTextureSpectrum(material.transmission_scatter, hit.u, hit.v);
     surface.metallic             = SampleAlpha(material.metallic, hit.u, hit.v);
     surface.reflectance          = SampleTextureSpectrum(material.reflectance, hit.u, hit.v);
     surface.edge_tint            = SampleTextureSpectrum(material.edge_tint, hit.u, hit.v);
     surface.falloff              = SampleTextureSpectrum(material.falloff, hit.u, hit.v);
-    
     surface.geometry_opacity     = SampleAlpha(material.geometry_opacity, hit.u, hit.v);
-    surface.absorption           = absorption_strength * absorption;
+
     surface.emission             = emission_strength * emission_color;
 
     // TODO: Do this in prepare_surface
@@ -1388,7 +1405,8 @@ trace_path :: (scene: Scene, primary: Ray, depth: s32, rng: *Path_State, stats: 
 
             if (hit.face == .BACK)
             {
-                throughput *= exp(-hit.t * surface.absorption);
+                // TODO: Do scattering
+                throughput *= exp(-hit.t * shading_context.volume.extinction);
             }
 
             // todo: clamping before adding??

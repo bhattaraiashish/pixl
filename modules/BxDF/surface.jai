@@ -11,14 +11,18 @@ Surface :: struct
     color                : Spectrum;
     diffuse_roughness    : float;
 
-    // Dielectrics
+    // Specular
     specular_ior         : float;
     specular_weight      : float;
-    transmission_weight  : float;
-
-    // Glossy/Specular
     specular_roughness   : float;
     specular_anisotropic : float;
+    specular_color       : Spectrum;
+
+    // Transmission
+    transmission_weight  : float;
+    transmission_color   : Spectrum;
+    transmission_depth   : float;
+    transmission_scatter : Spectrum;
 
     // Metals
     metallic             : float;
@@ -30,7 +34,6 @@ Surface :: struct
     geometry_opacity     : float;
 
     // TODO: Include these into the BRDF
-    absorption       : Spectrum;
     emission         : Spectrum;
 }
 
@@ -48,9 +51,9 @@ Glossy_Specular_Shading_Info :: struct
 {
     microfacet_alpha                      : Vector2;
 
-    transparent_dielectric_reflect_scale  : float;
-    transparent_dielectric_transmit_scale : float;
-    opaque_dielectric_reflect_scale       : float;
+    transparent_dielectric_reflect_scale  : Spectrum;
+    transparent_dielectric_transmit_scale : Spectrum;
+    opaque_dielectric_reflect_scale       : Spectrum;
     eta_t_over_eta_i_transparent          : float;
     eta_t_over_eta_i_opaque               : float;
 
@@ -94,10 +97,18 @@ Ambient_Shading_Info :: struct
     alpha: float;
 }
 
+Volume_Info :: struct
+{
+    extinction : Spectrum;
+    albedo     : Spectrum;
+    // anisotropy: float;
+}
+
 Shading_Context :: struct
 {
     using base : Base_Shading_Info;
     ambient    : Ambient_Shading_Info;
+    volume     : Volume_Info;
     wo         : Vector3;
 }
 
@@ -215,6 +226,24 @@ pdf_cosine :: (wi: Vector3) -> float
 max_spectrum :: inline (s: Spectrum) -> float
 {
     return max(s.x, s.y, s.z);
+}
+
+exp :: inline (s: Spectrum) -> Spectrum
+{
+    r : Spectrum = ---;
+    r.x = exp(s.x);
+    r.y = exp(s.y);
+    r.z = exp(s.z);
+    return r;
+}
+
+log :: inline (s: Spectrum) -> Spectrum
+{
+    r : Spectrum = ---;
+    r.x = log(s.x);
+    r.y = log(s.y);
+    r.z = log(s.z);
+    return r;
 }
 
 reflect :: inline (I: Vector3, N: Vector3) -> Vector3
